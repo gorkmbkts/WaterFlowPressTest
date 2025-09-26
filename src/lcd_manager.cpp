@@ -1,6 +1,11 @@
 #include "lcd_manager.h"
 #include "time_manager.h"
+#include "sensor_manager.h"
 #include <stdio.h>
+
+// External references
+extern TimeManager timeManager;
+extern SensorManager sensorManager;
 
 // Custom character definitions for Greek symbols
 const uint8_t char_mu[8] = {     // μ (mu)

@@ -2,6 +2,10 @@
 #include "time_manager.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+
+// External references
+extern TimeManager timeManager;
 
 // Static member definitions
 volatile uint32_t SensorManager::pulse_count = 0;

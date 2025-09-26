@@ -18,7 +18,6 @@
 #include <freertos/semphr.h>
 #include <WiFi.h>
 
-// Project headers
 #include "config.h"
 #include "sensor_data.h"
 #include "sensor_manager.h"
@@ -26,13 +25,15 @@
 #include "input_manager.h"
 #include "sd_manager.h"
 #include "time_manager.h"
+#include "system_monitor.h"
 
 // Global instances
 SensorManager sensorManager;
 LCDManager lcdManager;
 InputManager inputManager;
 SDManager sdManager;
-TimeManager timeManager;
+TimeManager timeManager;  
+SystemMonitor systemMonitor;
 
 // Global state
 UIScreen current_screen = SCREEN_BOOT;
@@ -99,15 +100,29 @@ void setup() {
 void loop() {
     // Main loop handles high-level coordination
     static uint32_t last_status_print = 0;
+    static uint32_t last_health_check = 0;
     
     // Handle user input and screen navigation
     handleUINavigation();
     
-    // Print debug status every 5 seconds
+    // Periodic system health monitoring
+    if (millis() - last_health_check > 10000) { // Every 10 seconds
+        systemMonitor.updateHealthStatus();
+        if (!systemMonitor.isSystemHealthy()) {
+            DEBUG_PRINTLN(F("System health warning detected"));
+            systemMonitor.performSystemRecovery();
+        }
+        last_health_check = millis();
+    }
+    
+    // Print debug status every 30 seconds
 #ifdef DEBUG_MODE
-    if (millis() - last_status_print > 5000) {
-        Serial.printf("Free heap: %d, Min free heap: %d\n", 
-            ESP.getFreeHeap(), ESP.getMinFreeHeap());
+    if (millis() - last_status_print > 30000) {
+        systemMonitor.printSystemStatus();
+        if (millis() - last_status_print > 120000) { // Print memory every 2 minutes
+            systemMonitor.printMemoryStatus();
+            last_status_print = millis();
+        }
         last_status_print = millis();
     }
 #endif
@@ -118,6 +133,9 @@ void loop() {
 
 void initializeSystem() {
     DEBUG_PRINTLN(F("Initializing system components..."));
+    
+    // Initialize system monitor first
+    systemMonitor.initialize();
     
     // Initialize time manager first
     timeManager.initialize();
@@ -133,22 +151,32 @@ void initializeSystem() {
     if (!inputManager.initialize()) {
         Serial.println(F("ERROR: Input initialization failed"));
         lcdManager.showError("Input Error");
+        systemMonitor.recordError("INPUT");
     }
     
     // Initialize sensor manager
     if (!sensorManager.initialize()) {
         Serial.println(F("ERROR: Sensor initialization failed"));
         lcdManager.showError("Sensor Error");
+        systemMonitor.recordError("SENSOR");
     }
     
     // Initialize SD card
     if (!sdManager.initialize()) {
         Serial.println(F("WARNING: SD card initialization failed"));
         lcdManager.showMessage("SD Card Error", "Logging disabled", 3000);
+        systemMonitor.recordError("SD");
+    } else {
+        // Start continuous logging
+        sdManager.startLogging();
     }
     
     system_initialized = true;
     DEBUG_PRINTLN(F("System initialization complete"));
+    
+    // Print initial system status
+    systemMonitor.printSystemStatus();
+    systemMonitor.printMemoryStatus();
 }
 
 void handleUINavigation() {

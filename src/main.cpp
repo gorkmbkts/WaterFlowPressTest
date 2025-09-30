@@ -3,14 +3,14 @@
 #include <Wire.h>
 #include <time.h>
 
-#include <Buttons/Buttons.h>
-#include <ConfigService/ConfigService.h>
-#include <FlowSensor/FlowSensor.h>
-#include <Joystick/Joystick.h>
-#include <LcdUI/LcdUI.h>
-#include <LevelSensor/LevelSensor.h>
-#include <SdLogger/SdLogger.h>
-#include <Utils/Utils.h>
+#include <../lib/Buttons/Buttons.h>
+#include <../lib/ConfigService/ConfigService.h>
+#include <../lib/FlowSensor/FlowSensor.h>
+#include <../lib/Joystick/Joystick.h>
+#include <../lib/LcdUI/LcdUI.h>
+#include <../lib/LevelSensor/LevelSensor.h>
+#include <../lib/SdLogger/SdLogger.h>
+#include <../lib/Utils/Utils.h>
 #include <LiquidCrystal_I2C.h>
 
 // ---- Hardware Pin Map ----

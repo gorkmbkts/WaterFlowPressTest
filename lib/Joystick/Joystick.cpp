@@ -2,7 +2,7 @@
 
 #include <driver/adc.h>
 
-#include <Utils/Utils.h>
+#include <../Utils/Utils.h>
 
 namespace {
 constexpr float ANALOG_MAX = 4095.0f;

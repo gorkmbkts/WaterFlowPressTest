@@ -69,11 +69,11 @@ void SdLogger::ensureDailyLog(time_t timestamp) {
     }
 }
 
-void SdLogger::writeCsvHeader(FsFile& file) {
+void SdLogger::writeCsvHeader(File32& file) {
     file.println(F("timestamp,iso8601,pulses,flow_lps,flow_baseline_lps,flow_diff_pct,flow_min_healthy_lps,flow_mean_lps,flow_median_lps,flow_std_lps,flow_min_lps,flow_max_lps,tank_height_cm,tank_empty_cm,tank_full_cm,tank_diff_pct,tank_noise_pct,tank_mean_cm,tank_median_cm,tank_std_cm,tank_min_cm,tank_max_cm,level_voltage,ema_voltage,density_factor"));
 }
 
-void SdLogger::writeLogLine(FsFile& file, const utils::SensorMetrics& metrics) {
+void SdLogger::writeLogLine(File32& file, const utils::SensorMetrics& metrics) {
     struct tm timeinfo;
     localtime_r(&metrics.timestamp, &timeinfo);
     char iso[25];
@@ -138,18 +138,18 @@ void SdLogger::ensureFreeSpace() {
         return;
     }
     uint64_t freeClusters = vol->freeClusterCount();
-    uint64_t bytesPerCluster = static_cast<uint64_t>(vol->blocksPerCluster()) * 512ULL;
+    uint64_t bytesPerCluster = static_cast<uint64_t>(vol->sectorsPerCluster()) * 512ULL;
     uint64_t freeBytes = freeClusters * bytesPerCluster;
     if (freeBytes >= FOUR_GB) {
         return;
     }
 
-    FsFile dir = _sd.open("/logs");
+    File32 dir = _sd.open("/logs");
     if (!dir) {
         return;
     }
     std::vector<String> logFiles;
-    FsFile file;
+    File32 file;
     while (file.openNext(&dir, O_RDONLY)) {
         if (file.isFile()) {
             char name[64];
@@ -165,9 +165,11 @@ void SdLogger::ensureFreeSpace() {
             break;
         }
         String fullPath = String("/logs/") + name;
-        FsFile toDelete = _sd.open(fullPath.c_str(), O_RDWR);
+        File32 toDelete = _sd.open(fullPath.c_str(), O_RDONLY);
         if (toDelete) {
-            uint32_t clusters = toDelete.clusterCount();
+            uint64_t fileSize = toDelete.fileSize();
+            // Estimate clusters based on file size
+            uint32_t clusters = (fileSize + bytesPerCluster - 1) / bytesPerCluster;
             uint64_t reclaimed = static_cast<uint64_t>(clusters) * bytesPerCluster;
             toDelete.close();
             _sd.remove(fullPath.c_str());

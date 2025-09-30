@@ -27,16 +27,16 @@ class SdLogger {
     void ensureDirectories();
     void ensureDailyLog(time_t timestamp);
     void ensureFreeSpace();
-    void writeCsvHeader(FsFile& file);
-    void writeLogLine(FsFile& file, const utils::SensorMetrics& metrics);
+    void writeCsvHeader(File32& file);
+    void writeLogLine(File32& file, const utils::SensorMetrics& metrics);
     void startEventFile(time_t timestamp);
     void closeEventFile();
     void flushFiles();
     void syncBufferLimit();
 
     SdFat32 _sd;
-    FsFile _logFile;
-    FsFile _eventFile;
+    File32 _logFile;
+    File32 _eventFile;
     String _currentLogPath;
     bool _sdReady = false;
     bool _eventRequested = false;

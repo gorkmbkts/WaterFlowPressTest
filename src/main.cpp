@@ -15,11 +15,11 @@
 
 // ---- Hardware Pin Map ----
 static const int PIN_FLOW_SENSOR = 25;
-static const int PIN_LEVEL_SENSOR = 36;  // ADC1 channel
-static const int PIN_JOYSTICK_X = 32;
-static const int PIN_JOYSTICK_Y = 33;
+static const int PIN_LEVEL_SENSOR = 32;  // ADC1 channel
+static const int PIN_JOYSTICK_X = 27;
+static const int PIN_JOYSTICK_Y = 26;
 static const int PIN_BUTTON_1 = 14;
-static const int PIN_BUTTON_2 = 27;
+static const int PIN_BUTTON_2 = 13;
 static const int PIN_LCD_SDA = 21;
 static const int PIN_LCD_SCL = 22;
 static const int PIN_SD_CS = 5;

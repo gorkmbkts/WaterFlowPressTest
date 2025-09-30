@@ -10,27 +10,14 @@ namespace {
 constexpr uint64_t FOUR_GB = 4ULL * 1024ULL * 1024ULL * 1024ULL;
 }
 
-bool SdLogger::begin(uint8_t csPin, uint8_t sckPin, uint8_t misoPin, uint8_t mosiPin, SPIClass& spi,
-                     ConfigService* config) {
+bool SdLogger::begin(uint8_t csPin, SPIClass& spi, ConfigService* config) {
     _csPin = csPin;
     _spi = &spi;
     _config = config;
     _paused = false;
     _removed = false;
-
-
-    _sd.end();
-    if (_spi) {
-        _spi->end();
-    }
-
-    _spi->begin(sckPin, misoPin, mosiPin, csPin);
-    pinMode(_csPin, OUTPUT);
-    digitalWrite(_csPin, HIGH);
-
-    _sdReady =
-        _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
-
+    _spi->begin();
+    _sdReady = _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
     if (_sdReady) {
         ensureDirectories();
     }
@@ -436,16 +423,6 @@ void SdLogger::safeRemove() {
         _logFile.sync();
         _logFile.close();
     }
-
-
-    _sd.end();
-    if (_spi) {
-        _spi->end();
-    }
-    pinMode(_csPin, OUTPUT);
-    digitalWrite(_csPin, HIGH);
-
-
     _currentLogPath = "";
     _sdReady = false;
     _removed = true;

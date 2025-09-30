@@ -14,6 +14,8 @@ bool SdLogger::begin(uint8_t csPin, SPIClass& spi, ConfigService* config) {
     _csPin = csPin;
     _spi = &spi;
     _config = config;
+    _paused = false;
+    _removed = false;
     _spi->begin();
     _sdReady = _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
     if (_sdReady) {
@@ -23,6 +25,9 @@ bool SdLogger::begin(uint8_t csPin, SPIClass& spi, ConfigService* config) {
 }
 
 bool SdLogger::ensureMount() {
+    if (_removed) {
+        return false;
+    }
     if (!_sdReady) {
         _sdReady = _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
         if (_sdReady) {
@@ -286,6 +291,9 @@ void SdLogger::syncBufferLimit() {
 }
 
 void SdLogger::log(const utils::SensorMetrics& metrics) {
+    if (_removed || _paused) {
+        return;
+    }
     if (!ensureMount()) {
         return;
     }
@@ -353,7 +361,7 @@ void SdLogger::closeEventFile() {
 }
 
 void SdLogger::update() {
-    if (!_sdReady) {
+    if (_removed || !_sdReady) {
         return;
     }
     ensureFreeSpace();
@@ -377,5 +385,52 @@ void SdLogger::flushFiles() {
 
 void SdLogger::requestEventSnapshot() {
     _eventRequested = true;
+}
+
+void SdLogger::resume() {
+    if (_removed) {
+        return;
+    }
+    if (!_sdReady) {
+        if (!ensureMount()) {
+            return;
+        }
+    }
+    _paused = false;
+}
+
+void SdLogger::safeRemove() {
+    if (_removed) {
+        return;
+    }
+    _paused = true;
+    if (!_sdReady) {
+        _currentLogPath = "";
+        _eventRequested = false;
+        _removed = true;
+        powerOffCard();
+        return;
+    }
+
+    flushFiles();
+    if (_eventActive) {
+        closeEventFile();
+    } else if (_eventFile) {
+        _eventFile.sync();
+        _eventFile.close();
+    }
+    if (_logFile) {
+        _logFile.sync();
+        _logFile.close();
+    }
+    _currentLogPath = "";
+    _sdReady = false;
+    _removed = true;
+    _eventRequested = false;
+    powerOffCard();
+}
+
+void SdLogger::powerOffCard() {
+    // Stub for hardware control of SD card power. Implement when wiring is available.
 }
 

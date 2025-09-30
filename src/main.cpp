@@ -341,6 +341,7 @@ void sensorTask(void* parameter) {
 void uiTask(void* parameter) {
     bool prevRemoved = g_logger.isRemoved();
     bool prevReady = g_logger.isReady();
+
     static uint32_t lastMountAttemptMs = 0;
     while (true) {
         uint32_t nowMs = millis();

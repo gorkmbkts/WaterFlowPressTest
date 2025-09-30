@@ -37,47 +37,11 @@ void LcdUI::setCalibrationCallback(CalibrationCallback cb) {
     _calibrationCallback = cb;
 }
 
-void LcdUI::showTemporaryMessage(const char* msg, uint32_t durationMs) {
-    _overlayText = msg ? msg : "";
-    _overlayEndMs = millis() + durationMs;
-    _overlayActive = true;
-    _overlayCachedLine[0] = "";
-    _overlayCachedLine[1] = "";
-    if (_lcd) {
-        _lcd->clear();
-    }
-    _scroll.cachedLine[0] = "";
-    _scroll.cachedLine[1] = "";
-}
-
 void LcdUI::setMetrics(const utils::SensorMetrics& metrics) {
     _metrics = metrics;
     _hasMetrics = true;
     _lastMetricsTimestamp = metrics.timestamp;
     rebuildScrollBuffers();
-}
-
-String LcdUI::centerText(const String& text) const {
-    String line = text;
-    if (line.length() > 16) {
-        line = line.substring(0, 16);
-    }
-    size_t len = line.length();
-    if (len >= 16) {
-        return line;
-    }
-    size_t totalPad = 16 - len;
-    size_t leftPad = totalPad / 2;
-    size_t rightPad = totalPad - leftPad;
-    String padded;
-    for (size_t i = 0; i < leftPad; ++i) {
-        padded += ' ';
-    }
-    padded += line;
-    for (size_t i = 0; i < rightPad; ++i) {
-        padded += ' ';
-    }
-    return padded;
 }
 
 void LcdUI::ensureCustomGlyphs() {
@@ -142,32 +106,6 @@ void LcdUI::update() {
 
     ensureCustomGlyphs();
     _buttons->update();
-
-    uint32_t now = millis();
-    if (_overlayActive && now >= _overlayEndMs) {
-        _overlayActive = false;
-        _overlayText = "";
-        _overlayCachedLine[0] = "";
-        _overlayCachedLine[1] = "";
-        if (_lcd) {
-            _lcd->clear();
-        }
-        _scroll.cachedLine[0] = "";
-        _scroll.cachedLine[1] = "";
-    }
-
-    if (!_overlayActive && _buttons->bothHeldFor(3000)) {
-        if (_logger) {
-            _logger->pause();
-            _logger->safeRemove();
-        }
-        showTemporaryMessage("SD removed safely", 3000);
-    }
-
-    if (_overlayActive) {
-        renderOverlay();
-        return;
-    }
 
     float joyX = _joystick->readX();
     float joyY = _joystick->readY();
@@ -276,46 +214,6 @@ void LcdUI::renderScrollLine(uint8_t row, const String& label, const std::vector
         _lcd->setCursor(0, row);
         _lcd->print(fullLine);
         _scroll.cachedLine[row] = fullLine;
-    }
-}
-
-void LcdUI::renderOverlay() {
-    if (!_lcd) {
-        return;
-    }
-    String text = _overlayText;
-    String line1;
-    String line2;
-    if (text.length() <= 16) {
-        line1 = centerText(text);
-        line2 = centerText("");
-    } else {
-        int splitIndex = text.lastIndexOf(' ', 16);
-        if (splitIndex < 0) {
-            splitIndex = 16;
-        }
-        line1 = text.substring(0, splitIndex);
-        line1.trim();
-        line2 = text.substring(splitIndex);
-        line2.trim();
-        if (line1.length() > 16) {
-            line1 = line1.substring(0, 16);
-        }
-        if (line2.length() > 16) {
-            line2 = line2.substring(0, 16);
-        }
-        line1 = centerText(line1);
-        line2 = centerText(line2);
-    }
-    if (_overlayCachedLine[0] != line1) {
-        _lcd->setCursor(0, 0);
-        _lcd->print(line1);
-        _overlayCachedLine[0] = line1;
-    }
-    if (_overlayCachedLine[1] != line2) {
-        _lcd->setCursor(0, 1);
-        _lcd->print(line2);
-        _overlayCachedLine[1] = line2;
     }
 }
 

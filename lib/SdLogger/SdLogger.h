@@ -15,11 +15,6 @@ class SdLogger {
     void log(const utils::SensorMetrics& metrics);
     void requestEventSnapshot();
     bool isReady() const { return _sdReady; }
-    bool isRemoved() const { return _removed; }
-    void pause() { _paused = true; }
-    void resume();
-    void safeRemove();
-    bool isPaused() const { return _paused; }
     bool hasEventActive() const { return _eventActive; }
 
   private:
@@ -39,15 +34,12 @@ class SdLogger {
     void closeEventFile();
     void flushFiles();
     void syncBufferLimit();
-    void powerOffCard();
 
     SdFat32 _sd;
     File32 _logFile;
     File32 _eventFile;
     String _currentLogPath;
     bool _sdReady = false;
-    bool _paused = false;
-    bool _removed = false;
     bool _eventRequested = false;
     bool _eventActive = false;
     time_t _eventEndTime = 0;

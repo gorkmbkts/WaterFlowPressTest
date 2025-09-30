@@ -20,8 +20,6 @@ class LcdUI {
     void update();
     void setMetrics(const utils::SensorMetrics& metrics);
     void setCalibrationCallback(CalibrationCallback cb);
-    void showTemporaryMessage(const char* msg, uint32_t durationMs);
-    bool isOverlayActive() const { return _overlayActive; }
 
   private:
     enum class ScreenState {
@@ -93,8 +91,6 @@ class LcdUI {
     const __FlashStringHelper* calibrationLabel(CalibrationEditor::Item item) const;
     float calibrationValue(CalibrationEditor::Item item) const;
     float calibrationStep(CalibrationEditor::Item item) const;
-    void renderOverlay();
-    String centerText(const String& text) const;
 
     LiquidCrystal_I2C* _lcd = nullptr;
     Buttons* _buttons = nullptr;
@@ -113,10 +109,6 @@ class LcdUI {
     CalibrationEditor _calEditor;
     time_t _lastMetricsTimestamp = 0;
     unsigned long _lastInputMillis = 0;
-    bool _overlayActive = false;
-    String _overlayText;
-    uint32_t _overlayEndMs = 0;
-    String _overlayCachedLine[2];
 
     uint8_t _glyphMu = 0;
     uint8_t _glyphEta = 1;

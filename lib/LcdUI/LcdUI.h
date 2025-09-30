@@ -41,6 +41,7 @@ class LcdUI {
         size_t tankOffset = 0;
         unsigned long lastScrollMillis = 0;
         unsigned long scrollInterval = 2000;
+        String cachedLine[2];
     };
 
     struct DateTimeEditor {
@@ -50,8 +51,21 @@ class LcdUI {
     };
 
     struct CalibrationEditor {
+        enum class Item : uint8_t {
+            MeasuredDepth,
+            Density,
+            ZeroCurrent,
+            FullCurrent,
+            FullScaleHeight,
+            PulsesPerLiter,
+            SensorInterval,
+            LoggingInterval,
+            SenseResistor,
+            SenseGain,
+        };
+
+        Item item = Item::MeasuredDepth;
         float value = 0.0f;
-        uint8_t cursorIndex = 0;
         bool active = false;
     };
 
@@ -72,6 +86,11 @@ class LcdUI {
     void handleMainNavigation(float joyX);
     void applyDateTime();
     void updateCalibration(float joyX, float joyY);
+    void selectCalibrationItem(CalibrationEditor::Item item);
+    void commitCalibrationValue();
+    const __FlashStringHelper* calibrationLabel(CalibrationEditor::Item item) const;
+    float calibrationValue(CalibrationEditor::Item item) const;
+    float calibrationStep(CalibrationEditor::Item item) const;
 
     LiquidCrystal_I2C* _lcd = nullptr;
     Buttons* _buttons = nullptr;

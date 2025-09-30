@@ -70,7 +70,13 @@ void SdLogger::ensureDailyLog(time_t timestamp) {
 }
 
 void SdLogger::writeCsvHeader(File32& file) {
-    file.println(F("timestamp,iso8601,pulses,flow_lps,flow_baseline_lps,flow_diff_pct,flow_min_healthy_lps,flow_mean_lps,flow_median_lps,flow_std_lps,flow_min_lps,flow_max_lps,tank_height_cm,tank_empty_cm,tank_full_cm,tank_diff_pct,tank_noise_pct,tank_mean_cm,tank_median_cm,tank_std_cm,tank_min_cm,tank_max_cm,level_voltage,ema_voltage,density_factor"));
+    file.print(F("timestamp,iso8601,pulses,flow_lps,flow_baseline_lps,flow_diff_pct,flow_min_healthy_lps,flow_mean_lps,flow_median_lps,flow_std_lps,flow_min_lps,flow_max_lps,"));
+    file.print(F("flow_pulse_mean_us,flow_pulse_median_us,flow_pulse_std_us,flow_pulse_cv,flow_period_count"));
+    for (size_t i = 0; i < utils::MAX_FLOW_PERIOD_SAMPLES; ++i) {
+        file.print(F(",flow_period_us_"));
+        file.print(i);
+    }
+    file.println(F(",tank_height_cm,tank_empty_cm,tank_full_cm,tank_diff_pct,tank_noise_pct,tank_mean_cm,tank_median_cm,tank_std_cm,tank_min_cm,tank_max_cm,level_voltage_inst,level_voltage_avg,level_voltage_median,level_voltage_trimmed,level_voltage_std,level_voltage_ema,level_current_ma,level_depth_mm,level_height_raw_cm,level_height_filtered_cm,level_velocity_mm_s,density_factor"));
 }
 
 void SdLogger::writeLogLine(File32& file, const utils::SensorMetrics& metrics) {
@@ -102,6 +108,22 @@ void SdLogger::writeLogLine(File32& file, const utils::SensorMetrics& metrics) {
     file.print(',');
     file.print(metrics.flowMaxLps, 4);
     file.print(',');
+    file.print(metrics.flowPulseMeanUs, 3);
+    file.print(',');
+    file.print(metrics.flowPulseMedianUs, 3);
+    file.print(',');
+    file.print(metrics.flowPulseStdUs, 3);
+    file.print(',');
+    file.print(metrics.flowPulseCv, 2);
+    file.print(',');
+    file.print(static_cast<uint32_t>(metrics.flowPeriodCount));
+    for (size_t i = 0; i < utils::MAX_FLOW_PERIOD_SAMPLES; ++i) {
+        file.print(',');
+        if (i < metrics.flowPeriodCount) {
+            file.print(metrics.flowRecentPeriods[i]);
+        }
+    }
+    file.print(',');
     file.print(metrics.tankHeightCm, 3);
     file.print(',');
     file.print(metrics.tankEmptyEstimateCm, 3);
@@ -124,7 +146,25 @@ void SdLogger::writeLogLine(File32& file, const utils::SensorMetrics& metrics) {
     file.print(',');
     file.print(metrics.levelVoltage, 4);
     file.print(',');
-    file.print(metrics.emaVoltage, 4);
+    file.print(metrics.levelAverageVoltage, 4);
+    file.print(',');
+    file.print(metrics.levelMedianVoltage, 4);
+    file.print(',');
+    file.print(metrics.levelTrimmedVoltage, 4);
+    file.print(',');
+    file.print(metrics.levelStdDevVoltage, 4);
+    file.print(',');
+    file.print(metrics.levelEmaVoltage, 4);
+    file.print(',');
+    file.print(metrics.levelCurrentMa, 3);
+    file.print(',');
+    file.print(metrics.levelDepthMm, 3);
+    file.print(',');
+    file.print(metrics.levelRawHeightCm, 3);
+    file.print(',');
+    file.print(metrics.levelFilteredHeightCm, 3);
+    file.print(',');
+    file.print(metrics.levelAlphaBetaVelocity, 3);
     file.print(',');
     file.println(metrics.densityFactor, 3);
 }
@@ -165,17 +205,62 @@ void SdLogger::ensureFreeSpace() {
             break;
         }
         String fullPath = String("/logs/") + name;
-        File32 toDelete = _sd.open(fullPath.c_str(), O_RDONLY);
-        if (toDelete) {
-            uint64_t fileSize = toDelete.fileSize();
-            // Estimate clusters based on file size
-            uint32_t clusters = (fileSize + bytesPerCluster - 1) / bytesPerCluster;
-            uint64_t reclaimed = static_cast<uint64_t>(clusters) * bytesPerCluster;
-            toDelete.close();
-            _sd.remove(fullPath.c_str());
-            freeBytes += reclaimed;
+        trimLogFile(fullPath);
+        freeClusters = vol->freeClusterCount();
+        freeBytes = freeClusters * bytesPerCluster;
+    }
+}
+
+void SdLogger::trimLogFile(const String& path) {
+    File32 source = _sd.open(path.c_str(), O_RDWR);
+    if (!source) {
+        return;
+    }
+    uint64_t size = source.fileSize();
+    const uint64_t minimumSize = 512ULL * 1024ULL;  // only trim files larger than 512 KB
+    if (size < minimumSize) {
+        source.close();
+        return;
+    }
+
+    uint64_t keepBytes = size / 2;
+    uint64_t offset = size - keepBytes;
+    if (!source.seek(offset)) {
+        source.close();
+        return;
+    }
+
+    // Skip to next newline to align with row boundary
+    while (source.available()) {
+        char ch = static_cast<char>(source.read());
+        if (ch == '\n') {
+            break;
         }
     }
+
+    String tempPath = path + ".tmp";
+    File32 temp = _sd.open(tempPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY);
+    if (!temp) {
+        source.close();
+        return;
+    }
+
+    writeCsvHeader(temp);
+
+    char buffer[256];
+    while (source.available()) {
+        int32_t readCount = source.read(buffer, sizeof(buffer));
+        if (readCount <= 0) {
+            break;
+        }
+        temp.write(buffer, readCount);
+    }
+    temp.sync();
+    temp.close();
+    source.close();
+
+    _sd.remove(path.c_str());
+    _sd.rename(tempPath.c_str(), path.c_str());
 }
 
 void SdLogger::syncBufferLimit() {
@@ -186,6 +271,17 @@ void SdLogger::syncBufferLimit() {
         }
         size_t entries = (20UL * 60UL * 1000UL) / interval;
         _maxBufferEntries = std::max<size_t>(entries, 60);
+    }
+    size_t entrySize = sizeof(LogEntry);
+    if (entrySize == 0) {
+        entrySize = 1;
+    }
+    size_t heapLimit = (ESP.getFreeHeap() / 2) / entrySize;
+    if (heapLimit < 60) {
+        heapLimit = 60;
+    }
+    if (_maxBufferEntries > heapLimit) {
+        _maxBufferEntries = heapLimit;
     }
 }
 

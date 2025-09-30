@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <set>
 #include <string>
@@ -10,6 +11,7 @@
 namespace utils {
 
 constexpr float EPSILON = 1e-6f;
+constexpr size_t MAX_FLOW_PERIOD_SAMPLES = 16;
 
 template <typename T>
 T clampValue(T value, T low, T high) {
@@ -37,6 +39,12 @@ struct SensorMetrics {
     float flowStdDevLps = NAN;
     float flowMaxLps = NAN;
     float flowMinLps = NAN;
+    float flowPulseMeanUs = NAN;
+    float flowPulseMedianUs = NAN;
+    float flowPulseStdUs = NAN;
+    float flowPulseCv = NAN;
+    std::array<uint32_t, MAX_FLOW_PERIOD_SAMPLES> flowRecentPeriods{};
+    size_t flowPeriodCount = 0;
 
     float tankHeightCm = 0.0f;
     float tankEmptyEstimateCm = NAN;
@@ -50,7 +58,16 @@ struct SensorMetrics {
     float tankMaxObservedCm = NAN;
 
     float levelVoltage = NAN;
-    float emaVoltage = NAN;
+    float levelAverageVoltage = NAN;
+    float levelMedianVoltage = NAN;
+    float levelTrimmedVoltage = NAN;
+    float levelStdDevVoltage = NAN;
+    float levelEmaVoltage = NAN;
+    float levelCurrentMa = NAN;
+    float levelDepthMm = NAN;
+    float levelRawHeightCm = NAN;
+    float levelFilteredHeightCm = NAN;
+    float levelAlphaBetaVelocity = NAN;
     float densityFactor = 1.0f;
 
     bool pumpOn = false;
@@ -60,8 +77,14 @@ struct LevelReading {
     float voltage = 0.0f;
     float averageVoltage = 0.0f;
     float medianVoltage = 0.0f;
+    float trimmedMeanVoltage = 0.0f;
     float emaVoltage = 0.0f;
     float heightCm = 0.0f;
+    float rawHeightCm = 0.0f;
+    float filteredHeightCm = 0.0f;
+    float depthMillimeters = 0.0f;
+    float currentMilliAmps = 0.0f;
+    float alphaBetaVelocity = 0.0f;
     float standardDeviation = 0.0f;
     float noisePercent = 0.0f;
 };
@@ -72,6 +95,9 @@ struct FlowReading {
     uint32_t lastPeriodMicros = 0;
     uint32_t lastTimestampMicros = 0;
     float flowLps = 0.0f;
+    float pulseMeanUs = NAN;
+    float pulseMedianUs = NAN;
+    float pulseStdUs = NAN;
 };
 
 inline float pulsesToFrequency(uint32_t pulses, float durationSeconds) {
@@ -81,10 +107,13 @@ inline float pulsesToFrequency(uint32_t pulses, float durationSeconds) {
     return static_cast<float>(pulses) / durationSeconds;
 }
 
-inline float pulsesToFlowLps(uint32_t pulses, float durationSeconds) {
+inline float pulsesToFlowLps(uint32_t pulses, float durationSeconds, float pulsesPerLiter) {
     float frequency = pulsesToFrequency(pulses, durationSeconds);
-    // Datasheet: f = 0.2 * Q(L/min) => Q(L/min) = f / 0.2 => Q(L/s) = (f / 0.2) / 60 = f / 12
-    return frequency / 12.0f;
+    if (pulsesPerLiter <= 0.0f) {
+        return 0.0f;
+    }
+    float litersPerSecond = frequency / pulsesPerLiter;
+    return litersPerSecond;
 }
 
 inline float voltageToHeightCm(float voltage, float zeroVoltage, float fullScaleVoltage, float fullScaleHeightCm, float densityFactor) {

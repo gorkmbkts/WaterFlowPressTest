@@ -12,6 +12,10 @@ class LevelSensor {
     void setOversample(uint8_t count);
     void setEmaAlpha(float alpha);
     void setCalibration(float zeroVoltage, float fullScaleVoltage, float fullScaleHeightCm);
+    void setCalibrationCurrent(float zeroCurrentMa, float fullCurrentMa, float fullScaleHeightMm);
+    void setCurrentSense(float resistorOhms, float gain = 1.0f);
+    void setFilterGains(float alphaGain, float betaGain);
+    void setSampleIntervalMs(uint32_t intervalMs);
     void setDensityFactor(float densityFactor);
     float densityFactor() const { return _densityFactor; }
 
@@ -19,6 +23,8 @@ class LevelSensor {
 
   private:
     float rawToVoltage(uint16_t raw) const;
+    float computeCurrentMilliAmps(float voltage) const;
+    float applyAlphaBetaFilter(float depthMm);
 
     uint8_t _pin;
     uint8_t _oversampleCount;
@@ -28,5 +34,15 @@ class LevelSensor {
     float _fullScaleVoltage;
     float _fullScaleHeightCm;
     float _densityFactor;
+    float _zeroCurrentMa;
+    float _fullCurrentMa;
+    float _fullScaleHeightMm;
+    float _senseResistorOhms;
+    float _senseGain;
+    float _alphaGain;
+    float _betaGain;
+    float _filteredDepthMm;
+    float _velocityMmPerSec;
+    float _sampleIntervalSec;
 };
 

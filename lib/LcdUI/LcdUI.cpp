@@ -2,6 +2,8 @@
 
 #include <sys/time.h>
 
+#include <cmath>
+
 #include "../ConfigService/ConfigService.h"
 #include "../SdLogger/SdLogger.h"
 
@@ -80,8 +82,8 @@ void LcdUI::transition(ScreenState next) {
             }
             break;
         case ScreenState::Calibration:
-            _calEditor.cursorIndex = 0;
             _calEditor.active = true;
+            selectCalibrationItem(CalibrationEditor::Item::MeasuredDepth);
             if (_lcd) {
                 _lcd->blink();
             }
@@ -111,7 +113,6 @@ void LcdUI::update() {
     bool calibrationHold = _buttons->bothHeldFor(5000);
     if (calibrationHold) {
         transition(ScreenState::Calibration);
-        _calEditor.value = _metrics.tankHeightCm;
     } else if (_buttons->wasPressed(Buttons::ButtonId::One) && !_buttons->isPressed(Buttons::ButtonId::Two) && _logger) {
         _logger->requestEventSnapshot();
     }
@@ -186,24 +187,33 @@ void LcdUI::renderDateEditor() {
 }
 
 void LcdUI::renderScrollLine(uint8_t row, const String& label, const std::vector<String>& items, size_t index, size_t offset) {
-    if (items.empty()) {
+    if (!_lcd) {
         return;
     }
-    String content = items[index];
-    size_t space = (label.length() >= 16) ? 0 : (16 - label.length());
-    if (content.length() > space && space > 0) {
-        size_t start = offset % content.length();
-        String scrolled = content.substring(start) + " " + content.substring(0, start);
-        content = scrolled.substring(0, space);
+    String fullLine;
+    if (!items.empty()) {
+        String content = items[index % items.size()];
+        size_t available = (label.length() >= 16) ? 0 : (16 - label.length());
+        if (available > 0 && content.length() > available) {
+            size_t start = offset % content.length();
+            String scrolled = content.substring(start) + ' ' + content.substring(0, start);
+            content = scrolled.substring(0, available);
+        }
+        fullLine = label + content;
+    } else {
+        fullLine = label;
     }
-    _lcd->setCursor(0, row);
-    _lcd->print(label);
-    _lcd->setCursor(label.length(), row);
-    _lcd->print(content);
-    size_t clearStart = label.length() + content.length();
-    while (clearStart < 16) {
-        _lcd->setCursor(clearStart++, row);
-        _lcd->print(' ');
+    if (fullLine.length() < 16) {
+        while (fullLine.length() < 16) {
+            fullLine += ' ';
+        }
+    } else if (fullLine.length() > 16) {
+        fullLine = fullLine.substring(0, 16);
+    }
+    if (_scroll.cachedLine[row] != fullLine) {
+        _lcd->setCursor(0, row);
+        _lcd->print(fullLine);
+        _scroll.cachedLine[row] = fullLine;
     }
 }
 
@@ -213,35 +223,224 @@ void LcdUI::renderMainScreen() {
 }
 
 void LcdUI::renderLevelStats() {
-    char buffer[17];
-    snprintf(buffer, sizeof(buffer), "MIN %5.1f MAX %5.1f", _metrics.tankMinObservedCm, _metrics.tankMaxObservedCm);
+    if (!_lcd) {
+        return;
+    }
+    char line[17];
+    snprintf(line, sizeof(line), "MED %5.1f N %4.1f", _metrics.tankMedianCm, _metrics.tankNoisePercent);
     _lcd->setCursor(0, 0);
-    _lcd->print(buffer);
-    snprintf(buffer, sizeof(buffer), "MU  %5.1f SD  %5.1f", _metrics.tankMeanCm, _metrics.tankStdDevCm);
+    _lcd->print(line);
+    snprintf(line, sizeof(line), "E%4.0f F%4.0f d%4.0f", _metrics.tankEmptyEstimateCm, _metrics.tankFullEstimateCm,
+             _metrics.tankDiffPercent);
     _lcd->setCursor(0, 1);
-    _lcd->print(buffer);
+    _lcd->print(line);
 }
 
 void LcdUI::renderFlowStats() {
-    char buffer[17];
-    snprintf(buffer, sizeof(buffer), "MIN %4.2f MAX %4.2f", _metrics.flowMinLps, _metrics.flowMaxLps);
+    if (!_lcd) {
+        return;
+    }
+    float flowCv = (!isnan(_metrics.flowMeanLps) && _metrics.flowMeanLps > 0.001f)
+                       ? (_metrics.flowStdDevLps / _metrics.flowMeanLps) * 100.0f
+                       : NAN;
+    char line[17];
+    snprintf(line, sizeof(line), "MED %4.2f CV%4.1f", _metrics.flowMedianLps, flowCv);
     _lcd->setCursor(0, 0);
-    _lcd->print(buffer);
-    snprintf(buffer, sizeof(buffer), "MU  %4.2f SD  %4.2f", _metrics.flowMeanLps, _metrics.flowStdDevLps);
+    _lcd->print(line);
+    snprintf(line, sizeof(line), "P10 %4.2f P90 %4.2f", _metrics.flowMinHealthyLps, _metrics.flowBaselineLps);
     _lcd->setCursor(0, 1);
-    _lcd->print(buffer);
+    _lcd->print(line);
 }
 
 void LcdUI::renderCalibration() {
+    if (!_lcd) {
+        return;
+    }
+    const __FlashStringHelper* label = calibrationLabel(_calEditor.item);
+    String title = String(F("CAL ")) + String(label);
+    while (title.length() < 16) {
+        title += ' ';
+    }
+    if (title.length() > 16) {
+        title = title.substring(0, 16);
+    }
     _lcd->setCursor(0, 0);
-    _lcd->print("Kalibrasyon     ");
+    _lcd->print(title);
+
+    float step = calibrationStep(_calEditor.item);
+    uint8_t decimals = 0;
+    if (step < 0.01f) {
+        decimals = 3;
+    } else if (step < 0.1f) {
+        decimals = 2;
+    } else if (step < 1.0f) {
+        decimals = 1;
+    }
+    char valueBuffer[16];
+    dtostrf(_calEditor.value, 0, decimals, valueBuffer);
+    String units;
+    switch (_calEditor.item) {
+        case CalibrationEditor::Item::MeasuredDepth:
+            units = F("cm");
+            break;
+        case CalibrationEditor::Item::Density:
+            units = F("rho");
+            break;
+        case CalibrationEditor::Item::ZeroCurrent:
+        case CalibrationEditor::Item::FullCurrent:
+            units = F("mA");
+            break;
+        case CalibrationEditor::Item::FullScaleHeight:
+            units = F("mm");
+            break;
+        case CalibrationEditor::Item::PulsesPerLiter:
+            units = F("p/L");
+            break;
+        case CalibrationEditor::Item::SensorInterval:
+        case CalibrationEditor::Item::LoggingInterval:
+            units = F("ms");
+            break;
+        case CalibrationEditor::Item::SenseResistor:
+            units = F("ohm");
+            break;
+        case CalibrationEditor::Item::SenseGain:
+            units = F("x");
+            break;
+    }
+    String valueLine = String(valueBuffer) + units;
+    while (valueLine.length() < 11) {
+        valueLine += ' ';
+    }
+    valueLine += F("1:OK 2:EX");
+    if (valueLine.length() > 16) {
+        valueLine = valueLine.substring(0, 16);
+    }
     _lcd->setCursor(0, 1);
-    _lcd->print("cm: ");
-    char buffer[10];
-    dtostrf(_calEditor.value, 0, 1, buffer);
-    _lcd->print(buffer);
-    _lcd->print("       ");
-    _lcd->setCursor(4 + _calEditor.cursorIndex, 1);
+    _lcd->print(valueLine);
+}
+
+void LcdUI::selectCalibrationItem(CalibrationEditor::Item item) {
+    _calEditor.item = item;
+    _calEditor.value = calibrationValue(item);
+}
+
+const __FlashStringHelper* LcdUI::calibrationLabel(CalibrationEditor::Item item) const {
+    switch (item) {
+        case CalibrationEditor::Item::MeasuredDepth:
+            return F("Depth cm");
+        case CalibrationEditor::Item::Density:
+            return F("Density");
+        case CalibrationEditor::Item::ZeroCurrent:
+            return F("Zero mA");
+        case CalibrationEditor::Item::FullCurrent:
+            return F("Full mA");
+        case CalibrationEditor::Item::FullScaleHeight:
+            return F("Full mm");
+        case CalibrationEditor::Item::PulsesPerLiter:
+            return F("Pulse/L");
+        case CalibrationEditor::Item::SensorInterval:
+            return F("Sensor ms");
+        case CalibrationEditor::Item::LoggingInterval:
+            return F("Log ms");
+        case CalibrationEditor::Item::SenseResistor:
+            return F("Shunt ohm");
+        case CalibrationEditor::Item::SenseGain:
+            return F("Gain");
+    }
+    return F("Cal");
+}
+
+float LcdUI::calibrationValue(CalibrationEditor::Item item) const {
+    if (!_config) {
+        return 0.0f;
+    }
+    switch (item) {
+        case CalibrationEditor::Item::MeasuredDepth:
+            return _hasMetrics ? _metrics.tankHeightCm : _calEditor.value;
+        case CalibrationEditor::Item::Density:
+            return _config->densityFactor();
+        case CalibrationEditor::Item::ZeroCurrent:
+            return _config->zeroCurrentMa();
+        case CalibrationEditor::Item::FullCurrent:
+            return _config->fullScaleCurrentMa();
+        case CalibrationEditor::Item::FullScaleHeight:
+            return _config->fullScaleHeightMm();
+        case CalibrationEditor::Item::PulsesPerLiter:
+            return _config->pulsesPerLiter();
+        case CalibrationEditor::Item::SensorInterval:
+            return static_cast<float>(_config->sensorIntervalMs());
+        case CalibrationEditor::Item::LoggingInterval:
+            return static_cast<float>(_config->loggingIntervalMs());
+        case CalibrationEditor::Item::SenseResistor:
+            return _config->currentSenseResistorOhms();
+        case CalibrationEditor::Item::SenseGain:
+            return _config->currentSenseGain();
+    }
+    return 0.0f;
+}
+
+float LcdUI::calibrationStep(CalibrationEditor::Item item) const {
+    switch (item) {
+        case CalibrationEditor::Item::MeasuredDepth:
+            return 0.5f;
+        case CalibrationEditor::Item::Density:
+            return 0.01f;
+        case CalibrationEditor::Item::ZeroCurrent:
+        case CalibrationEditor::Item::FullCurrent:
+            return 0.1f;
+        case CalibrationEditor::Item::FullScaleHeight:
+            return 10.0f;
+        case CalibrationEditor::Item::PulsesPerLiter:
+            return 0.2f;
+        case CalibrationEditor::Item::SensorInterval:
+        case CalibrationEditor::Item::LoggingInterval:
+            return 100.0f;
+        case CalibrationEditor::Item::SenseResistor:
+            return 1.0f;
+        case CalibrationEditor::Item::SenseGain:
+            return 0.05f;
+    }
+    return 1.0f;
+}
+
+void LcdUI::commitCalibrationValue() {
+    if (!_config) {
+        return;
+    }
+    switch (_calEditor.item) {
+        case CalibrationEditor::Item::MeasuredDepth:
+            if (_calibrationCallback) {
+                _calibrationCallback(_calEditor.value);
+            }
+            break;
+        case CalibrationEditor::Item::Density:
+            _config->setDensityFactor(_calEditor.value);
+            break;
+        case CalibrationEditor::Item::ZeroCurrent:
+            _config->setZeroCurrentMa(_calEditor.value);
+            break;
+        case CalibrationEditor::Item::FullCurrent:
+            _config->setFullScaleCurrentMa(_calEditor.value);
+            break;
+        case CalibrationEditor::Item::FullScaleHeight:
+            _config->setFullScaleHeightMm(_calEditor.value);
+            break;
+        case CalibrationEditor::Item::PulsesPerLiter:
+            _config->setPulsesPerLiter(_calEditor.value);
+            break;
+        case CalibrationEditor::Item::SensorInterval:
+            _config->setSensorIntervalMs(static_cast<uint32_t>(roundf(_calEditor.value)));
+            break;
+        case CalibrationEditor::Item::LoggingInterval:
+            _config->setLoggingIntervalMs(static_cast<uint32_t>(roundf(_calEditor.value)));
+            break;
+        case CalibrationEditor::Item::SenseResistor:
+            _config->setCurrentSenseResistorOhms(_calEditor.value);
+            break;
+        case CalibrationEditor::Item::SenseGain:
+            _config->setCurrentSenseGain(_calEditor.value);
+            break;
+    }
 }
 
 void LcdUI::handleTimeEditing(float joyX, float joyY) {
@@ -348,13 +547,15 @@ void LcdUI::updateScrollState() {
         _scroll.lastScrollMillis = now;
         _scroll.flowOffset++;
         _scroll.tankOffset++;
-        if (_scroll.flowLines.size() > 1 && _scroll.flowOffset > _scroll.flowLines[_scroll.flowIndex].length()) {
+        if (_scroll.flowLines.size() > 1 && _scroll.flowOffset >= _scroll.flowLines[_scroll.flowIndex].length()) {
             _scroll.flowOffset = 0;
             _scroll.flowIndex = (_scroll.flowIndex + 1) % _scroll.flowLines.size();
+            _scroll.cachedLine[0] = "";
         }
-        if (_scroll.tankLines.size() > 1 && _scroll.tankOffset > _scroll.tankLines[_scroll.tankIndex].length()) {
+        if (_scroll.tankLines.size() > 1 && _scroll.tankOffset >= _scroll.tankLines[_scroll.tankIndex].length()) {
             _scroll.tankOffset = 0;
             _scroll.tankIndex = (_scroll.tankIndex + 1) % _scroll.tankLines.size();
+            _scroll.cachedLine[1] = "";
         }
     }
 }
@@ -363,31 +564,33 @@ void LcdUI::rebuildScrollBuffers() {
     if (!_hasMetrics) {
         return;
     }
-    String mu(1, static_cast<char>(_glyphMu));
-    String eta(1, static_cast<char>(_glyphEta));
-    String theta(1, static_cast<char>(_glyphTheta));
-    String sigma(1, static_cast<char>(_glyphSigma));
+    _scroll.flowLines.clear();
+    _scroll.tankLines.clear();
 
-    _scroll.flowLines = {
-        String("Q=") + utils::formatFloat(_metrics.flowLps, 2) + " L/s",
-        String("Qn=") + utils::formatFloat(_metrics.flowBaselineLps, 2) + " L/s",
-        String("Qdif=") + utils::formatFloat(_metrics.flowDiffPercent, 1) + "%",
-        String("Qmin=") + utils::formatFloat(_metrics.flowMinHealthyLps, 2) + " L/s",
-        String("Q") + mu + "=" + utils::formatFloat(_metrics.flowMeanLps, 2) + " L/s",
-        String("Q") + eta + "=" + utils::formatFloat(_metrics.flowMedianLps, 2) + " L/s"};
+    _scroll.flowLines.push_back(String("Q ") + utils::formatFloat(_metrics.flowLps, 2) + "L/s");
+    _scroll.flowLines.push_back(String("Med ") + utils::formatFloat(_metrics.flowMedianLps, 2));
+    _scroll.flowLines.push_back(String("P10 ") + utils::formatFloat(_metrics.flowMinHealthyLps, 2));
+    _scroll.flowLines.push_back(String("P90 ") + utils::formatFloat(_metrics.flowBaselineLps, 2));
+    _scroll.flowLines.push_back(String("d ") + utils::formatFloat(_metrics.flowDiffPercent, 1) + "%");
+    if (!isnan(_metrics.flowPulseCv)) {
+        _scroll.flowLines.push_back(String("CV ") + utils::formatFloat(_metrics.flowPulseCv, 1) + "%");
+    }
 
-    _scroll.tankLines = {
-        String("h=") + utils::formatFloat(_metrics.tankHeightCm, 1) + " cm",
-        String("h") + theta + "=" + utils::formatFloat(_metrics.tankEmptyEstimateCm, 1) + " cm",
-        String("h") + sigma + "=" + utils::formatFloat(_metrics.tankFullEstimateCm, 1) + " cm",
-        String("hdif=") + utils::formatFloat(_metrics.tankDiffPercent, 1) + "%",
-        String("signal:") + utils::qualitativeNoise(_metrics.tankNoisePercent)};
+    _scroll.tankLines.push_back(String("h ") + utils::formatFloat(_metrics.tankHeightCm, 1) + "cm");
+    _scroll.tankLines.push_back(String("Med ") + utils::formatFloat(_metrics.tankMedianCm, 1));
+    _scroll.tankLines.push_back(String("Empty ") + utils::formatFloat(_metrics.tankEmptyEstimateCm, 1));
+    _scroll.tankLines.push_back(String("Full ") + utils::formatFloat(_metrics.tankFullEstimateCm, 1));
+    _scroll.tankLines.push_back(String("d ") + utils::formatFloat(_metrics.tankDiffPercent, 1) + "%");
+    _scroll.tankLines.push_back(String("Noise ") + utils::formatFloat(_metrics.tankNoisePercent, 1) + "%");
+    _scroll.tankLines.push_back(String("Sig ") + utils::qualitativeNoise(_metrics.tankNoisePercent));
 
     _scroll.flowIndex = 0;
     _scroll.tankIndex = 0;
     _scroll.flowOffset = 0;
     _scroll.tankOffset = 0;
     _scroll.lastScrollMillis = millis();
+    _scroll.cachedLine[0] = "";
+    _scroll.cachedLine[1] = "";
 }
 
 void LcdUI::handleMainNavigation(float joyX) {
@@ -418,23 +621,32 @@ void LcdUI::handleMainNavigation(float joyX) {
 }
 
 void LcdUI::updateCalibration(float joyX, float joyY) {
-    (void)joyX;
     unsigned long now = millis();
-    if (fabs(joyY) > 0.2f && now - _lastInputMillis > 150) {
-        float step = (fabs(joyY) > 0.8f) ? 1.6f : 0.5f;
-        _calEditor.value += (joyY > 0 ? step : -step);
-        if (_calEditor.value < 0.0f) {
+    float step = calibrationStep(_calEditor.item);
+    float accel = (fabs(joyY) > 0.8f) ? 5.0f : 1.0f;
+    if (fabs(joyY) > 0.2f && now - _lastInputMillis > 120) {
+        _calEditor.value += (joyY > 0 ? step : -step) * accel;
+        if (_calEditor.item == CalibrationEditor::Item::MeasuredDepth && _calEditor.value < 0.0f) {
             _calEditor.value = 0.0f;
         }
         _lastInputMillis = now;
     }
 
+    if (fabs(joyX) > 0.4f && now - _lastInputMillis > 200) {
+        int direction = joyX > 0 ? 1 : -1;
+        constexpr uint8_t itemCount = static_cast<uint8_t>(CalibrationEditor::Item::SenseGain) + 1;
+        uint8_t index = static_cast<uint8_t>(_calEditor.item);
+        index = (index + itemCount + direction) % itemCount;
+        selectCalibrationItem(static_cast<CalibrationEditor::Item>(index));
+        _lastInputMillis = now;
+    }
+
     if (_buttons->wasPressed(Buttons::ButtonId::One)) {
-        if (_calibrationCallback) {
-            _calibrationCallback(_calEditor.value);
-        }
-        transition(ScreenState::Main);
-    } else if (_buttons->wasPressed(Buttons::ButtonId::Two)) {
+        commitCalibrationValue();
+        selectCalibrationItem(_calEditor.item);
+        _lastInputMillis = now;
+    }
+    if (_buttons->wasPressed(Buttons::ButtonId::Two)) {
         transition(ScreenState::Main);
     }
 }

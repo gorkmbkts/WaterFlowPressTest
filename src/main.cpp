@@ -341,7 +341,19 @@ void sensorTask(void* parameter) {
 void uiTask(void* parameter) {
     bool prevRemoved = g_logger.isRemoved();
     bool prevReady = g_logger.isReady();
+
+    static uint32_t lastMountAttemptMs = 0;
     while (true) {
+        uint32_t nowMs = millis();
+        if ((g_logger.isRemoved() || !g_logger.isReady()) && nowMs - lastMountAttemptMs >= 2000) {
+            bool mounted = g_logger.begin(PIN_SD_CS, g_spi, &g_config);
+            lastMountAttemptMs = nowMs;
+            if (mounted) {
+                g_logger.resume();
+                g_sdNotifier.markPresent();
+            }
+        }
+
         utils::SensorMetrics metrics;
         bool hasMetrics = false;
         portENTER_CRITICAL(&g_metricsMux);

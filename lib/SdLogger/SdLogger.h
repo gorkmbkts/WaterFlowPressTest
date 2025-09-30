@@ -10,8 +10,7 @@ class ConfigService;
 
 class SdLogger {
   public:
-    bool begin(uint8_t csPin, uint8_t sckPin, uint8_t misoPin, uint8_t mosiPin, SPIClass& spi,
-               ConfigService* config);
+    bool begin(uint8_t csPin, SPIClass& spi, ConfigService* config);
     void update();
     void log(const utils::SensorMetrics& metrics);
     void requestEventSnapshot();

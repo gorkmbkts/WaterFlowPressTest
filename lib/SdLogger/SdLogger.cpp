@@ -18,6 +18,7 @@ bool SdLogger::begin(uint8_t csPin, uint8_t sckPin, uint8_t misoPin, uint8_t mos
     _paused = false;
     _removed = false;
 
+
     _sd.end();
     if (_spi) {
         _spi->end();
@@ -29,6 +30,7 @@ bool SdLogger::begin(uint8_t csPin, uint8_t sckPin, uint8_t misoPin, uint8_t mos
 
     _sdReady =
         _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
+
     if (_sdReady) {
         ensureDirectories();
     }
@@ -435,12 +437,14 @@ void SdLogger::safeRemove() {
         _logFile.close();
     }
 
+
     _sd.end();
     if (_spi) {
         _spi->end();
     }
     pinMode(_csPin, OUTPUT);
     digitalWrite(_csPin, HIGH);
+
 
     _currentLogPath = "";
     _sdReady = false;

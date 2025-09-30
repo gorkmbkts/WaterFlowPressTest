@@ -132,6 +132,7 @@ void setup() {
     g_buttons.begin(PIN_BUTTON_1, PIN_BUTTON_2);
     g_joystick.begin(PIN_JOYSTICK_X, PIN_JOYSTICK_Y, 0.08f);
 
+
     bool sdReady =
         g_logger.begin(PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, g_spi, &g_config);
     if (!sdReady) {
@@ -341,6 +342,7 @@ void sensorTask(void* parameter) {
 void uiTask(void* parameter) {
     bool prevRemoved = g_logger.isRemoved();
     bool prevReady = g_logger.isReady();
+
     static uint32_t lastMountAttemptMs = 0;
     while (true) {
         uint32_t nowMs = millis();
@@ -352,6 +354,7 @@ void uiTask(void* parameter) {
             nowMs = millis();
             bool mounted = g_logger.begin(PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, g_spi,
                                           &g_config);
+
             lastMountAttemptMs = nowMs;
             if (mounted) {
                 g_logger.resume();
@@ -374,15 +377,19 @@ void uiTask(void* parameter) {
         if (removed && !prevRemoved) {
             g_sdNotifier.markAbsent();
             g_sdNotifier.defer();
+
             lastMountAttemptMs = nowMs;
+
         } else if (!removed && ready && !prevReady) {
             g_sdNotifier.markPresent();
         } else if (!ready && prevReady && !removed) {
             g_sdNotifier.markAbsent();
+
             lastMountAttemptMs = nowMs;
         } else if (!ready && !removed && !g_sdNotifier.absent) {
             g_sdNotifier.markAbsent();
             lastMountAttemptMs = nowMs;
+
         }
 
         if (ready && !removed && g_logger.isPaused()) {

@@ -1,6 +1,7 @@
 #include "LevelSensor.h"
 
 #include <algorithm>
+#include <numeric>
 #include <vector>
 
 namespace {
@@ -16,7 +17,17 @@ LevelSensor::LevelSensor()
       _zeroVoltage(0.48f),
       _fullScaleVoltage(2.4f),
       _fullScaleHeightCm(500.0f),
-      _densityFactor(1.0f) {}
+      _densityFactor(1.0f),
+      _zeroCurrentMa(4.0f),
+      _fullCurrentMa(20.0f),
+      _fullScaleHeightMm(5000.0f),
+      _senseResistorOhms(150.0f),
+      _senseGain(1.0f),
+      _alphaGain(0.4f),
+      _betaGain(0.02f),
+      _filteredDepthMm(NAN),
+      _velocityMmPerSec(0.0f),
+      _sampleIntervalSec(1.0f) {}
 
 void LevelSensor::begin(uint8_t pin, adc_attenuation_t attenuation) {
     _pin = pin;
@@ -39,12 +50,63 @@ void LevelSensor::setCalibration(float zeroVoltage, float fullScaleVoltage, floa
     _fullScaleHeightCm = fullScaleHeightCm;
 }
 
+void LevelSensor::setCalibrationCurrent(float zeroCurrentMa, float fullCurrentMa, float fullScaleHeightMm) {
+    _zeroCurrentMa = zeroCurrentMa;
+    _fullCurrentMa = fullCurrentMa;
+    _fullScaleHeightMm = fullScaleHeightMm;
+}
+
+void LevelSensor::setCurrentSense(float resistorOhms, float gain) {
+    _senseResistorOhms = std::max(1.0f, resistorOhms);
+    _senseGain = std::max(0.1f, gain);
+}
+
+void LevelSensor::setFilterGains(float alphaGain, float betaGain) {
+    _alphaGain = utils::clampValue(alphaGain, 0.01f, 1.0f);
+    _betaGain = utils::clampValue(betaGain, 0.001f, 1.0f);
+}
+
+void LevelSensor::setSampleIntervalMs(uint32_t intervalMs) {
+    if (intervalMs < 50) {
+        intervalMs = 50;
+    }
+    _sampleIntervalSec = static_cast<float>(intervalMs) / 1000.0f;
+}
+
 void LevelSensor::setDensityFactor(float densityFactor) {
     _densityFactor = densityFactor;
 }
 
 float LevelSensor::rawToVoltage(uint16_t raw) const {
     return (static_cast<float>(raw) / ADC_MAX_VALUE) * ADC_REFERENCE_VOLTAGE;
+}
+
+float LevelSensor::computeCurrentMilliAmps(float voltage) const {
+    float effectiveGain = (_senseGain <= 0.0f) ? 1.0f : _senseGain;
+    float resistor = (_senseResistorOhms <= 0.0f) ? 1.0f : _senseResistorOhms;
+    return (voltage / (resistor * effectiveGain)) * 1000.0f;
+}
+
+float LevelSensor::applyAlphaBetaFilter(float depthMm) {
+    float depth = depthMm;
+    if (isnan(depth)) {
+        return _filteredDepthMm;
+    }
+    float dt = (_sampleIntervalSec <= 0.0f) ? 1.0f : _sampleIntervalSec;
+    if (isnan(_filteredDepthMm)) {
+        _filteredDepthMm = depth;
+        _velocityMmPerSec = 0.0f;
+    } else {
+        float prediction = _filteredDepthMm + _velocityMmPerSec * dt;
+        float residual = depth - prediction;
+        _filteredDepthMm = prediction + _alphaGain * residual;
+        _velocityMmPerSec = _velocityMmPerSec + (_betaGain * residual) / dt;
+    }
+    if (_filteredDepthMm < 0.0f) {
+        _filteredDepthMm = 0.0f;
+        _velocityMmPerSec = 0.0f;
+    }
+    return _filteredDepthMm;
 }
 
 utils::LevelReading LevelSensor::sample() {
@@ -83,6 +145,19 @@ utils::LevelReading LevelSensor::sample() {
         }
     }
 
+    size_t trimCount = std::max<size_t>(1, sorted.size() / 10);
+    float trimmedMean = 0.0f;
+    if (sorted.size() > 2 * trimCount) {
+        float trimmedSum = 0.0f;
+        for (size_t i = trimCount; i < sorted.size() - trimCount; ++i) {
+            trimmedSum += sorted[i];
+        }
+        trimmedMean = trimmedSum / static_cast<float>(sorted.size() - 2 * trimCount);
+    } else {
+        trimmedMean = reading.averageVoltage;
+    }
+    reading.trimmedMeanVoltage = trimmedMean;
+
     float variance = 0.0f;
     for (float v : voltages) {
         float diff = v - reading.averageVoltage;
@@ -99,8 +174,29 @@ utils::LevelReading LevelSensor::sample() {
 
     reading.voltage = voltages.back();
     reading.emaVoltage = _ema;
-    reading.noisePercent = (reading.averageVoltage > 0.0f) ? (reading.standardDeviation / reading.averageVoltage) * 100.0f : 0.0f;
-    reading.heightCm = utils::voltageToHeightCm(_ema, _zeroVoltage, _fullScaleVoltage, _fullScaleHeightCm, _densityFactor);
+    float referenceVoltage = reading.trimmedMeanVoltage > 0.0f ? reading.trimmedMeanVoltage : reading.averageVoltage;
+    reading.noisePercent = (referenceVoltage > 0.0f) ? (reading.standardDeviation / referenceVoltage) * 100.0f : 0.0f;
+
+    float currentMa = computeCurrentMilliAmps(trimmedMean);
+    reading.currentMilliAmps = currentMa;
+
+    float spanMa = _fullCurrentMa - _zeroCurrentMa;
+    float normalizedCurrent = 0.0f;
+    if (spanMa > 0.1f) {
+        normalizedCurrent = (currentMa - _zeroCurrentMa) / spanMa;
+    }
+    normalizedCurrent = utils::clampValue(normalizedCurrent, 0.0f, 1.0f);
+    float depthMm = normalizedCurrent * _fullScaleHeightMm;
+    float density = (_densityFactor <= 0.0f) ? 1.0f : _densityFactor;
+    if (density > 0.0f) {
+        depthMm /= density;
+    }
+    reading.depthMillimeters = depthMm;
+    float filteredMm = applyAlphaBetaFilter(depthMm);
+    reading.filteredHeightCm = isnan(filteredMm) ? NAN : (filteredMm / 10.0f);
+    reading.rawHeightCm = depthMm / 10.0f;
+    reading.heightCm = isnan(reading.filteredHeightCm) ? reading.rawHeightCm : reading.filteredHeightCm;
+    reading.alphaBetaVelocity = _velocityMmPerSec;
 
     return reading;
 }

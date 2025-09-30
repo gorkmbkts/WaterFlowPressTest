@@ -11,6 +11,9 @@
 #include <../lib/LevelSensor/LevelSensor.h>
 #include <../lib/SdLogger/SdLogger.h>
 #include <../lib/Utils/Utils.h>
+#include <algorithm>
+#include <cmath>
+#include <vector>
 #include <LiquidCrystal_I2C.h>
 
 // ---- Hardware Pin Map ----
@@ -82,6 +85,11 @@ void setup() {
     g_levelSensor.begin(PIN_LEVEL_SENSOR, ADC_11db);
     g_levelSensor.setOversample(g_config.levelOversampleCount());
     g_levelSensor.setDensityFactor(g_config.densityFactor());
+    g_levelSensor.setCalibrationCurrent(g_config.zeroCurrentMa(), g_config.fullScaleCurrentMa(),
+                                       g_config.fullScaleHeightMm());
+    g_levelSensor.setCurrentSense(g_config.currentSenseResistorOhms(), g_config.currentSenseGain());
+    g_levelSensor.setFilterGains(g_config.alphaGain(), g_config.betaGain());
+    g_levelSensor.setSampleIntervalMs(g_config.sensorIntervalMs());
 
     g_buttons.begin(PIN_BUTTON_1, PIN_BUTTON_2);
     g_joystick.begin(PIN_JOYSTICK_X, PIN_JOYSTICK_Y, 0.08f);
@@ -107,17 +115,112 @@ void sensorTask(void* parameter) {
     utils::FlowAnalytics flowAnalytics;
     utils::LevelAnalytics levelAnalytics;
     TickType_t lastWake = xTaskGetTickCount();
-    const TickType_t intervalTicks = pdMS_TO_TICKS(g_config.sensorIntervalMs());
-    uint32_t previousCount = g_flowSensor.takeSnapshot().totalPulses;
+    uint32_t intervalMs = g_config.sensorIntervalMs();
+    if (intervalMs < 200) {
+        intervalMs = 200;
+    }
+    TickType_t intervalTicks = pdMS_TO_TICKS(intervalMs);
+    g_levelSensor.setSampleIntervalMs(intervalMs);
+    g_levelSensor.setCalibrationCurrent(g_config.zeroCurrentMa(), g_config.fullScaleCurrentMa(), g_config.fullScaleHeightMm());
+    g_levelSensor.setCurrentSense(g_config.currentSenseResistorOhms(), g_config.currentSenseGain());
+    g_levelSensor.setFilterGains(g_config.alphaGain(), g_config.betaGain());
+    g_levelSensor.setDensityFactor(g_config.densityFactor());
+    FlowSensor::Snapshot initialSnapshot = g_flowSensor.takeSnapshot();
+    uint64_t previousCount = initialSnapshot.totalPulses;
+    float lastZeroCurrent = g_config.zeroCurrentMa();
+    float lastFullCurrent = g_config.fullScaleCurrentMa();
+    float lastFullHeightMm = g_config.fullScaleHeightMm();
+    float lastSenseResistor = g_config.currentSenseResistorOhms();
+    float lastSenseGain = g_config.currentSenseGain();
+    float lastAlphaGain = g_config.alphaGain();
+    float lastBetaGain = g_config.betaGain();
+    float lastDensity = g_config.densityFactor();
 
     while (true) {
         vTaskDelayUntil(&lastWake, intervalTicks);
 
+        uint32_t desiredInterval = g_config.sensorIntervalMs();
+        if (desiredInterval != intervalMs) {
+            intervalMs = desiredInterval < 200 ? 200 : desiredInterval;
+            intervalTicks = pdMS_TO_TICKS(intervalMs);
+            g_levelSensor.setSampleIntervalMs(intervalMs);
+        }
+
+        float zeroCurrent = g_config.zeroCurrentMa();
+        float fullCurrent = g_config.fullScaleCurrentMa();
+        float fullHeightMm = g_config.fullScaleHeightMm();
+        if (fabsf(zeroCurrent - lastZeroCurrent) > 0.001f || fabsf(fullCurrent - lastFullCurrent) > 0.001f ||
+            fabsf(fullHeightMm - lastFullHeightMm) > 0.1f) {
+            g_levelSensor.setCalibrationCurrent(zeroCurrent, fullCurrent, fullHeightMm);
+            lastZeroCurrent = zeroCurrent;
+            lastFullCurrent = fullCurrent;
+            lastFullHeightMm = fullHeightMm;
+        }
+        float senseRes = g_config.currentSenseResistorOhms();
+        float senseGain = g_config.currentSenseGain();
+        if (fabsf(senseRes - lastSenseResistor) > 0.1f || fabsf(senseGain - lastSenseGain) > 0.001f) {
+            g_levelSensor.setCurrentSense(senseRes, senseGain);
+            lastSenseResistor = senseRes;
+            lastSenseGain = senseGain;
+        }
+        float alphaGain = g_config.alphaGain();
+        float betaGain = g_config.betaGain();
+        if (fabsf(alphaGain - lastAlphaGain) > 0.0001f || fabsf(betaGain - lastBetaGain) > 0.0001f) {
+            g_levelSensor.setFilterGains(alphaGain, betaGain);
+            lastAlphaGain = alphaGain;
+            lastBetaGain = betaGain;
+        }
+        float density = g_config.densityFactor();
+        if (fabsf(density - lastDensity) > 0.0001f) {
+            g_levelSensor.setDensityFactor(density);
+            lastDensity = density;
+        }
+
         FlowSensor::Snapshot snapshot = g_flowSensor.takeSnapshot();
-        uint32_t deltaPulses = snapshot.totalPulses - previousCount;
+        uint64_t deltaTotal = snapshot.totalPulses - previousCount;
         previousCount = snapshot.totalPulses;
-        float intervalSeconds = static_cast<float>(g_config.sensorIntervalMs()) / 1000.0f;
-        float flowLps = utils::pulsesToFlowLps(deltaPulses, intervalSeconds);
+        uint32_t deltaPulses = static_cast<uint32_t>(deltaTotal);
+        float intervalSeconds = static_cast<float>(intervalMs) / 1000.0f;
+        float flowLps = utils::pulsesToFlowLps(deltaPulses, intervalSeconds, g_config.pulsesPerLiter());
+
+        std::vector<float> pulsePeriodsUs;
+        pulsePeriodsUs.reserve(snapshot.periodCount);
+        for (size_t i = 0; i < snapshot.periodCount; ++i) {
+            if (snapshot.recentPeriods[i] > 0) {
+                pulsePeriodsUs.push_back(static_cast<float>(snapshot.recentPeriods[i]));
+            }
+        }
+
+        float pulseMeanUs = NAN;
+        float pulseMedianUs = NAN;
+        float pulseStdUs = NAN;
+        float pulseCv = NAN;
+        if (!pulsePeriodsUs.empty()) {
+            double sum = 0.0;
+            for (float value : pulsePeriodsUs) {
+                sum += value;
+            }
+            pulseMeanUs = static_cast<float>(sum / pulsePeriodsUs.size());
+            std::vector<float> sortedPeriods = pulsePeriodsUs;
+            std::sort(sortedPeriods.begin(), sortedPeriods.end());
+            if (sortedPeriods.size() % 2 == 0) {
+                pulseMedianUs = (sortedPeriods[sortedPeriods.size() / 2 - 1] +
+                                 sortedPeriods[sortedPeriods.size() / 2]) /
+                                2.0f;
+            } else {
+                pulseMedianUs = sortedPeriods[sortedPeriods.size() / 2];
+            }
+            double variance = 0.0;
+            for (float value : pulsePeriodsUs) {
+                double diff = value - pulseMeanUs;
+                variance += diff * diff;
+            }
+            variance /= pulsePeriodsUs.size();
+            pulseStdUs = static_cast<float>(sqrt(variance));
+            if (!isnan(pulseMeanUs) && fabs(pulseMeanUs) > 0.0001f) {
+                pulseCv = (pulseStdUs / pulseMeanUs) * 100.0f;
+            }
+        }
 
         utils::FlowAnalyticsResult flowResult = flowAnalytics.update(flowLps);
 
@@ -139,6 +242,14 @@ void sensorTask(void* parameter) {
         metrics.flowStdDevLps = flowResult.stdDevLps;
         metrics.flowMinLps = flowResult.minLps;
         metrics.flowMaxLps = flowResult.maxLps;
+        metrics.flowPulseMeanUs = pulseMeanUs;
+        metrics.flowPulseMedianUs = pulseMedianUs;
+        metrics.flowPulseStdUs = pulseStdUs;
+        metrics.flowPulseCv = pulseCv;
+        metrics.flowPeriodCount = pulsePeriodsUs.size();
+        for (size_t i = 0; i < utils::MAX_FLOW_PERIOD_SAMPLES && i < pulsePeriodsUs.size(); ++i) {
+            metrics.flowRecentPeriods[i] = static_cast<uint32_t>(pulsePeriodsUs[i]);
+        }
         metrics.pumpOn = flowResult.pumpOn;
 
         metrics.tankHeightCm = levelReading.heightCm;
@@ -153,8 +264,17 @@ void sensorTask(void* parameter) {
         metrics.tankStdDevCm = levelResult.stdDevCm;
         metrics.tankMinObservedCm = levelResult.minCm;
         metrics.tankMaxObservedCm = levelResult.maxCm;
-        metrics.levelVoltage = levelReading.averageVoltage;
-        metrics.emaVoltage = levelReading.emaVoltage;
+        metrics.levelVoltage = levelReading.voltage;
+        metrics.levelAverageVoltage = levelReading.averageVoltage;
+        metrics.levelMedianVoltage = levelReading.medianVoltage;
+        metrics.levelTrimmedVoltage = levelReading.trimmedMeanVoltage;
+        metrics.levelStdDevVoltage = levelReading.standardDeviation;
+        metrics.levelEmaVoltage = levelReading.emaVoltage;
+        metrics.levelCurrentMa = levelReading.currentMilliAmps;
+        metrics.levelDepthMm = levelReading.depthMillimeters;
+        metrics.levelRawHeightCm = levelReading.rawHeightCm;
+        metrics.levelFilteredHeightCm = levelReading.filteredHeightCm;
+        metrics.levelAlphaBetaVelocity = levelReading.alphaBetaVelocity;
         metrics.densityFactor = g_config.densityFactor();
 
         portENTER_CRITICAL(&g_metricsMux);
@@ -198,9 +318,23 @@ void uiTask(void* parameter) {
 
 void loggerTask(void* parameter) {
     utils::SensorMetrics metrics;
+    utils::SensorMetrics latest;
+    bool haveLatest = false;
+    TickType_t lastLogTick = xTaskGetTickCount();
     while (true) {
         if (g_loggerQueue && xQueueReceive(g_loggerQueue, &metrics, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            g_logger.log(metrics);
+            latest = metrics;
+            haveLatest = true;
+        }
+        uint32_t intervalMs = g_config.loggingIntervalMs();
+        if (intervalMs < 500) {
+            intervalMs = 500;
+        }
+        TickType_t now = xTaskGetTickCount();
+        if (haveLatest && now - lastLogTick >= pdMS_TO_TICKS(intervalMs)) {
+            g_logger.log(latest);
+            lastLogTick = now;
+            haveLatest = false;
         }
         g_logger.update();
         vTaskDelay(pdMS_TO_TICKS(200));

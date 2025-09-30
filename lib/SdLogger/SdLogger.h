@@ -29,6 +29,7 @@ class SdLogger {
     void ensureFreeSpace();
     void writeCsvHeader(File32& file);
     void writeLogLine(File32& file, const utils::SensorMetrics& metrics);
+    void trimLogFile(const String& path);
     void startEventFile(time_t timestamp);
     void closeEventFile();
     void flushFiles();

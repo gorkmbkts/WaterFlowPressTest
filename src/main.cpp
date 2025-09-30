@@ -53,6 +53,44 @@ TaskHandle_t g_sensorTaskHandle = nullptr;
 TaskHandle_t g_uiTaskHandle = nullptr;
 TaskHandle_t g_loggerTaskHandle = nullptr;
 
+struct SdAbsentNotifier {
+    bool absent = false;
+    uint32_t nextShowAt = 0;
+    static const uint32_t kIntervalMs = 10000;
+    static const uint32_t kDurationMs = 5000;
+
+    void markAbsent() {
+        if (!absent) {
+            absent = true;
+            nextShowAt = millis();
+        }
+    }
+
+    void markPresent() {
+        absent = false;
+        nextShowAt = 0;
+    }
+
+    void defer() {
+        if (absent) {
+            nextShowAt = millis() + kIntervalMs;
+        }
+    }
+
+    void update(LcdUI& ui) {
+        if (!absent) {
+            return;
+        }
+        uint32_t now = millis();
+        if (!ui.isOverlayActive() && now >= nextShowAt) {
+            ui.showTemporaryMessage("SD card not found", kDurationMs);
+            nextShowAt = now + kIntervalMs;
+        }
+    }
+};
+
+SdAbsentNotifier g_sdNotifier;
+
 void sensorTask(void* parameter);
 void uiTask(void* parameter);
 void loggerTask(void* parameter);
@@ -94,8 +132,11 @@ void setup() {
     g_buttons.begin(PIN_BUTTON_1, PIN_BUTTON_2);
     g_joystick.begin(PIN_JOYSTICK_X, PIN_JOYSTICK_Y, 0.08f);
 
-    g_spi.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-    g_logger.begin(PIN_SD_CS, g_spi, &g_config);
+    bool sdReady =
+        g_logger.begin(PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, g_spi, &g_config);
+    if (!sdReady) {
+        g_sdNotifier.markAbsent();
+    }
 
     g_ui.begin(&g_lcd, &g_buttons, &g_joystick, &g_logger, &g_config);
     g_ui.setCalibrationCallback(applyCalibration);
@@ -298,7 +339,26 @@ void sensorTask(void* parameter) {
 }
 
 void uiTask(void* parameter) {
+    bool prevRemoved = g_logger.isRemoved();
+    bool prevReady = g_logger.isReady();
+    static uint32_t lastMountAttemptMs = 0;
     while (true) {
+        uint32_t nowMs = millis();
+        if (lastMountAttemptMs == 0) {
+            lastMountAttemptMs = nowMs;
+        }
+        if ((g_logger.isRemoved() || !g_logger.isReady()) && nowMs - lastMountAttemptMs >= 500) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            nowMs = millis();
+            bool mounted = g_logger.begin(PIN_SD_CS, PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, g_spi,
+                                          &g_config);
+            lastMountAttemptMs = nowMs;
+            if (mounted) {
+                g_logger.resume();
+                g_sdNotifier.markPresent();
+            }
+        }
+
         utils::SensorMetrics metrics;
         bool hasMetrics = false;
         portENTER_CRITICAL(&g_metricsMux);
@@ -308,10 +368,35 @@ void uiTask(void* parameter) {
         }
         portEXIT_CRITICAL(&g_metricsMux);
 
+        bool removed = g_logger.isRemoved();
+        bool ready = g_logger.isReady();
+
+        if (removed && !prevRemoved) {
+            g_sdNotifier.markAbsent();
+            g_sdNotifier.defer();
+            lastMountAttemptMs = nowMs;
+        } else if (!removed && ready && !prevReady) {
+            g_sdNotifier.markPresent();
+        } else if (!ready && prevReady && !removed) {
+            g_sdNotifier.markAbsent();
+            lastMountAttemptMs = nowMs;
+        } else if (!ready && !removed && !g_sdNotifier.absent) {
+            g_sdNotifier.markAbsent();
+            lastMountAttemptMs = nowMs;
+        }
+
+        if (ready && !removed && g_logger.isPaused()) {
+            g_logger.resume();
+        }
+
+        g_sdNotifier.update(g_ui);
+
         if (hasMetrics) {
             g_ui.setMetrics(metrics);
         }
         g_ui.update();
+        prevRemoved = removed;
+        prevReady = ready;
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

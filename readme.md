@@ -1,6 +1,6 @@
 # Project Kalkan (WaterFlowPressTest)
 
-ESP32 tabanli, debi (flow) ve tank seviye sensorlerini izleyen, LCD uzerinden gosteren ve SD karta kaydeden microcontroller projesi.
+ESP32 tabanli, debi (flow) ve tank seviye sensorlerini izleyen, LCD uzerinden gosteren ve SD karta kaydeden microcontroller projesi. te
 
 Detayli kullanici kilavuzu icin `manual.md` dosyasina bakabilirsiniz.
 

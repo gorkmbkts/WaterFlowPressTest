@@ -8,8 +8,6 @@
 #include "../SdLogger/SdLogger.h"
 
 namespace {
-const char* MONTH_NAMES_TR[] = {"Ocak",   "Subat",  "Mart",   "Nisan",  "Mayis",  "Haziran",
-                                "Temmuz", "Agustos", "Eylul",  "Ekim",   "Kasim",  "Aralik"};
 
 const uint8_t GLYPH_MU[] = {0b00100, 0b01010, 0b01010, 0b01010, 0b01010, 0b11011, 0b00000, 0b00000};
 const uint8_t GLYPH_ETA[] = {0b11011, 0b01010, 0b01010, 0b01110, 0b01010, 0b01010, 0b01010, 0b00000};
@@ -59,6 +57,19 @@ void LcdUI::transition(ScreenState next) {
     if (_state == next) {
         return;
     }
+    
+    // SD kart kaldırma durumu için önceki state'i sakla
+    if (next == ScreenState::SdCardRemoved) {
+        _previousState = _state;
+        _sdRemovedStart = millis();
+    }
+    
+    // SD kart hazır durumu için önceki state'i sakla
+    if (next == ScreenState::SdCardReady) {
+        _previousState = _state;
+        _sdReadyStart = millis();
+    }
+    
     _state = next;
     _lastInputMillis = millis();
     if (_lcd) {
@@ -67,6 +78,21 @@ void LcdUI::transition(ScreenState next) {
     switch (_state) {
         case ScreenState::SetTime: {
             time_t now = time(nullptr);
+            // If current time is before June 15, 2025, set default to June 15, 2025
+            struct tm defaultDate;
+            defaultDate.tm_year = 125; // 2025
+            defaultDate.tm_mon = 5;    // June (0-based)
+            defaultDate.tm_mday = 15;  // 15th
+            defaultDate.tm_hour = 12;  // 12:00
+            defaultDate.tm_min = 0;
+            defaultDate.tm_sec = 0;
+            defaultDate.tm_isdst = -1;
+            time_t defaultTime = mktime(&defaultDate);
+            
+            if (now < defaultTime) {
+                now = defaultTime;
+            }
+            
             localtime_r(&now, &_editor.tmData);
             _editor.cursorIndex = 0;
             _editor.editingTime = true;
@@ -77,6 +103,7 @@ void LcdUI::transition(ScreenState next) {
         }
         case ScreenState::SetDate:
             _editor.editingTime = false;
+            _editor.cursorIndex = 0; // Start at day field (first position)
             if (_lcd) {
                 _lcd->blink();
             }
@@ -110,11 +137,26 @@ void LcdUI::update() {
     float joyX = _joystick->readX();
     float joyY = _joystick->readY();
 
+    // Button debug (sadece başlangıçta birkaç kez yazdır)
+    static int debugCount = 0;
+    if (debugCount < 10) {
+        Serial.printf("🔘 Button1: %s, Button2: %s, HeldFor: %s\n", 
+            _buttons->isPressed(Buttons::ButtonId::One) ? "PRESSED" : "released",
+            _buttons->isPressed(Buttons::ButtonId::Two) ? "PRESSED" : "released",
+            _buttons->isHeldFor(Buttons::ButtonId::One, 3000) ? "3SEC+" : "no"
+        );
+        debugCount++;
+    }
+
     bool calibrationHold = _buttons->bothHeldFor(5000);
     if (calibrationHold) {
         transition(ScreenState::Calibration);
     } else if (_buttons->wasPressed(Buttons::ButtonId::One) && !_buttons->isPressed(Buttons::ButtonId::Two) && _logger) {
         _logger->requestEventSnapshot();
+    } else if (_buttons->isHeldFor(Buttons::ButtonId::One, 3000) && _logger && _state != ScreenState::SdCardRemoved) {
+        Serial.println("🔴 Button 1 3 saniye basıldı, SD güvenli kaldırma başlatılıyor...");
+        _logger->prepareForRemoval();
+        transition(ScreenState::SdCardRemoved);
     }
 
     switch (_state) {
@@ -149,6 +191,12 @@ void LcdUI::update() {
             updateCalibration(joyX, joyY);
             renderCalibration();
             break;
+        case ScreenState::SdCardRemoved:
+            renderSdCardRemoved();
+            break;
+        case ScreenState::SdCardReady:
+            renderSdCardReady();
+            break;
     }
 }
 
@@ -176,14 +224,44 @@ void LcdUI::renderDateEditor() {
     _lcd->setCursor(0, 0);
     _lcd->print("Tarihi Ayarla   ");
 
+    // Create blinking effect by alternating display every 500ms
+    static unsigned long lastBlinkTime = 0;
+    static bool showCursor = true;
+    unsigned long currentTime = millis();
+    
+    if (currentTime - lastBlinkTime > 500) {
+        showCursor = !showCursor;
+        lastBlinkTime = currentTime;
+    }
+
     char buffer[17];
-    const char* month = MONTH_NAMES_TR[_editor.tmData.tm_mon % 12];
-    snprintf(buffer, sizeof(buffer), "%2d %s %4d", _editor.tmData.tm_mday, month, 1900 + _editor.tmData.tm_year);
-    _lcd->setCursor(0, 1);
+    // Use DD/MM/YYYY format and handle blinking for selected field
+    if (showCursor) {
+        // Show normal text
+        snprintf(buffer, sizeof(buffer), "%02d/%02d/%4d", _editor.tmData.tm_mday, (_editor.tmData.tm_mon + 1), 1900 + _editor.tmData.tm_year);
+    } else {
+        // Show with spaces for the selected field to create blinking effect
+        switch (_editor.cursorIndex) {
+            case 0: // Day field
+                snprintf(buffer, sizeof(buffer), "  /%02d/%4d", (_editor.tmData.tm_mon + 1), 1900 + _editor.tmData.tm_year);
+                break;
+            case 1: // Month field  
+                snprintf(buffer, sizeof(buffer), "%02d/  /%4d", _editor.tmData.tm_mday, 1900 + _editor.tmData.tm_year);
+                break;
+            case 2: // Year field
+                snprintf(buffer, sizeof(buffer), "%02d/%02d/    ", _editor.tmData.tm_mday, (_editor.tmData.tm_mon + 1));
+                break;
+            default:
+                snprintf(buffer, sizeof(buffer), "%02d/%02d/%4d", _editor.tmData.tm_mday, (_editor.tmData.tm_mon + 1), 1900 + _editor.tmData.tm_year);
+                break;
+        }
+    }
+    
+    _lcd->setCursor(2, 1);
     _lcd->print(buffer);
 
-    uint8_t cursorPositions[] = {0, 3, 13};
-    _lcd->setCursor(cursorPositions[std::min<uint8_t>(_editor.cursorIndex, 2)], 1);
+    // Turn off LCD's built-in blink since we're handling it manually
+    _lcd->noBlink();
 }
 
 void LcdUI::renderScrollLine(uint8_t row, const String& label, const std::vector<String>& items, size_t index, size_t offset) {
@@ -648,6 +726,49 @@ void LcdUI::updateCalibration(float joyX, float joyY) {
     }
     if (_buttons->wasPressed(Buttons::ButtonId::Two)) {
         transition(ScreenState::Main);
+    }
+}
+
+void LcdUI::renderSdCardRemoved() {
+    _lcd->setCursor(0, 0);
+    _lcd->print(F("SD kart        "));
+    _lcd->setCursor(0, 1);
+    _lcd->print(F("kaldirildi     "));
+    
+    // 5 saniye sonra önceki ekrana dön
+    if (millis() - _sdRemovedStart >= 5000) {
+        transition(_previousState);
+    }
+}
+
+void LcdUI::renderSdCardReady() {
+    static unsigned long lastDebug = 0;
+    if (millis() - lastDebug > 1000) {
+        Serial.printf("📺 SD hazır ekranı render ediliyor... Kalan süre: %lu ms\n", 
+                     5000 - (millis() - _sdReadyStart));
+        lastDebug = millis();
+    }
+    
+    _lcd->setCursor(0, 0);
+    _lcd->print(F("SD kart        "));
+    _lcd->setCursor(0, 1);
+    _lcd->print(F("hazir          "));
+    
+    // 5 saniye sonra önceki ekrana dön
+    if (millis() - _sdReadyStart >= 5000) {
+        Serial.printf("⏰ SD hazır süresi doldu, önceki ekrana dönüyor: %d\n", (int)_previousState);
+        transition(_previousState);
+    }
+}
+
+void LcdUI::showSdCardReady() {
+    Serial.printf("🖥️ showSdCardReady çağrıldı, mevcut state: %d\n", (int)_state);
+    // Sadece SD kart kaldırma durumu değilse mesajı göster
+    if (_state != ScreenState::SdCardRemoved) {
+        Serial.println("📺 SD kart hazır ekranına geçiliyor...");
+        transition(ScreenState::SdCardReady);
+    } else {
+        Serial.println("⏸️ SD kart kaldırma ekranında olduğu için mesaj gösterilmiyor");
     }
 }
 

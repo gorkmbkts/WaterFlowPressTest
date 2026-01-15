@@ -20,6 +20,7 @@ class LcdUI {
     void update();
     void setMetrics(const utils::SensorMetrics& metrics);
     void setCalibrationCallback(CalibrationCallback cb);
+    void showSdCardReady();
 
   private:
     enum class ScreenState {
@@ -29,7 +30,9 @@ class LcdUI {
         Main,
         LevelStats,
         FlowStats,
-        Calibration
+        Calibration,
+        SdCardRemoved,
+        SdCardReady
     };
 
     struct ScrollState {
@@ -76,6 +79,8 @@ class LcdUI {
     void renderLevelStats();
     void renderFlowStats();
     void renderCalibration();
+    void renderSdCardRemoved();
+    void renderSdCardReady();
     void renderScrollLine(uint8_t row, const String& label, const std::vector<String>& items, size_t index, size_t offset);
     void ensureCustomGlyphs();
     void updateScrollState();
@@ -100,7 +105,10 @@ class LcdUI {
     CalibrationCallback _calibrationCallback;
 
     ScreenState _state = ScreenState::Boot;
+    ScreenState _previousState = ScreenState::Main;
     unsigned long _bootStart = 0;
+    unsigned long _sdRemovedStart = 0;
+    unsigned long _sdReadyStart = 0;
     bool _glyphsReady = false;
     bool _hasMetrics = false;
     utils::SensorMetrics _metrics;

@@ -29,11 +29,11 @@ float Joystick::normalize(int raw) const {
 
 float Joystick::readX() {
     int raw = analogRead(_pinX);
-    return normalize(raw);
+    return -normalize(raw);
 }
 
 float Joystick::readY() {
     int raw = analogRead(_pinY);
-    return normalize(raw);
+    return -normalize(raw);  // Y ekseni ters çevrildi
 }
 

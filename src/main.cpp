@@ -21,8 +21,8 @@ static const int PIN_FLOW_SENSOR = 25;
 static const int PIN_LEVEL_SENSOR = 32;  // ADC1 channel
 static const int PIN_JOYSTICK_X = 27;
 static const int PIN_JOYSTICK_Y = 26;
-static const int PIN_BUTTON_1 = 14;
-static const int PIN_BUTTON_2 = 13;
+static const int PIN_BUTTON_1 = 13;
+static const int PIN_BUTTON_2 = 14;
 static const int PIN_LCD_SDA = 21;
 static const int PIN_LCD_SCL = 22;
 static const int PIN_SD_CS = 5;
@@ -48,6 +48,7 @@ QueueHandle_t g_loggerQueue = nullptr;
 portMUX_TYPE g_metricsMux = portMUX_INITIALIZER_UNLOCKED;
 utils::SensorMetrics g_latestMetrics;
 volatile bool g_metricsAvailable = false;
+volatile bool g_sdCardReadyFlag = false;
 
 TaskHandle_t g_sensorTaskHandle = nullptr;
 TaskHandle_t g_uiTaskHandle = nullptr;
@@ -70,12 +71,65 @@ void applyCalibration(float actualDepthCm) {
     g_levelSensor.setDensityFactor(newDensity);
 }
 
+void debugSdCard() {
+    Serial.println("=== SD CARD DEBUG ===");
+    
+    if (!g_logger.isReady()) {
+        Serial.println("❌ SD Logger not ready");
+        return;
+    }
+    
+    Serial.println("✅ SD Logger ready");
+    
+    // Test dosya oluşturma
+    time_t now = time(nullptr);
+    Serial.printf("Current timestamp: %ld\n", now);
+    
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    char dateStr[32];
+    strftime(dateStr, sizeof(dateStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    Serial.printf("Current time: %s\n", dateStr);
+    
+    // SD kart bilgileri
+    Serial.printf("SD Card Type: %d\n", SD.cardType());
+    Serial.printf("SD Card Size: %llu MB\n", SD.cardSize() / (1024 * 1024));
+    Serial.printf("Total bytes: %llu\n", SD.totalBytes());
+    Serial.printf("Used bytes: %llu\n", SD.usedBytes());
+    
+    // Manuel test dosyası oluştur
+    File testFile = SD.open("/debug_test.txt", FILE_WRITE);
+    if (testFile) {
+        testFile.println("SD Card test successful!");
+        testFile.printf("Timestamp: %ld\n", now);
+        testFile.close();
+        Serial.println("✅ Test file created: /debug_test.txt");
+    } else {
+        Serial.println("❌ Failed to create test file");
+    }
+    
+    // Klasörleri kontrol et
+    if (SD.exists("/logs")) {
+        Serial.println("✅ /logs directory exists");
+    } else {
+        Serial.println("❌ /logs directory missing");
+    }
+    
+    if (SD.exists("/events")) {
+        Serial.println("✅ /events directory exists");
+    } else {
+        Serial.println("❌ /events directory missing");
+    }
+    
+    Serial.println("==================");
+}
+
 void setup() {
-#ifdef PROJECT_KALKAN_DEBUG
     Serial.begin(115200);
-    delay(200);
-    Serial.println("Project Kalkan debug mode");
-#endif
+    delay(500);
+    Serial.println("=============================");
+    Serial.println("Project Kalkan Starting Up...");
+    Serial.println("=============================");
 
     g_config.begin();
 
@@ -99,12 +153,22 @@ void setup() {
 
     g_ui.begin(&g_lcd, &g_buttons, &g_joystick, &g_logger, &g_config);
     g_ui.setCalibrationCallback(applyCalibration);
+    
+    // SD kart hazır callback'ini ayarla
+    g_logger.setSdReadyCallback([]() {
+        Serial.println("🚩 SD hazır flag ayarlanıyor...");
+        g_sdCardReadyFlag = true;
+    });
 
     g_loggerQueue = xQueueCreate(12, sizeof(utils::SensorMetrics));
 
     xTaskCreatePinnedToCore(sensorTask, "sensor", 8192, nullptr, 3, &g_sensorTaskHandle, 0);
     xTaskCreatePinnedToCore(uiTask, "ui", 8192, nullptr, 2, &g_uiTaskHandle, 1);
     xTaskCreatePinnedToCore(loggerTask, "logger", 6144, nullptr, 1, &g_loggerTaskHandle, 0);
+
+    // Debug SD kart durumunu kontrol et
+    delay(3000); // Sistem tamamen başlayana kadar bekle
+    debugSdCard();
 }
 
 void loop() {
@@ -176,12 +240,17 @@ void sensorTask(void* parameter) {
             lastDensity = density;
         }
 
-        FlowSensor::Snapshot snapshot = g_flowSensor.takeSnapshot();
+        FlowSensor::Snapshot snapshot;
+        uint32_t deltaPulses = 0;
+        float intervalSeconds = static_cast<float>(intervalMs) / 1000.0f;
+        float flowLps = NAN;
+        
+        // Flow sensor verilerini güvenli şekilde al
+        snapshot = g_flowSensor.takeSnapshot();
         uint64_t deltaTotal = snapshot.totalPulses - previousCount;
         previousCount = snapshot.totalPulses;
-        uint32_t deltaPulses = static_cast<uint32_t>(deltaTotal);
-        float intervalSeconds = static_cast<float>(intervalMs) / 1000.0f;
-        float flowLps = utils::pulsesToFlowLps(deltaPulses, intervalSeconds, g_config.pulsesPerLiter());
+        deltaPulses = static_cast<uint32_t>(deltaTotal);
+        flowLps = utils::pulsesToFlowLps(deltaPulses, intervalSeconds, g_config.pulsesPerLiter());
 
         std::vector<float> pulsePeriodsUs;
         pulsePeriodsUs.reserve(snapshot.periodCount);
@@ -224,7 +293,9 @@ void sensorTask(void* parameter) {
 
         utils::FlowAnalyticsResult flowResult = flowAnalytics.update(flowLps);
 
+        // Level sensor verilerini al (sensör bağlı değilse NaN değerleri döner)
         utils::LevelReading levelReading = g_levelSensor.sample();
+        
         utils::LevelAnalyticsResult levelResult = levelAnalytics.update(levelReading.heightCm, levelReading.noisePercent);
 
         utils::SensorMetrics metrics;
@@ -286,14 +357,17 @@ void sensorTask(void* parameter) {
             xQueueSend(g_loggerQueue, &metrics, 0);
         }
 
-#ifdef PROJECT_KALKAN_DEBUG
-        Serial.print("Flow L/s: ");
-        Serial.print(metrics.flowLps, 3);
-        Serial.print(" | Tank cm: ");
-        Serial.print(metrics.tankHeightCm, 2);
-        Serial.print(" | Noise %: ");
-        Serial.println(metrics.tankNoisePercent, 2);
-#endif
+        // Debug sensor değerleri (sadece 10 saniyede bir yazdır, spam olmasın)
+        static unsigned long lastSensorPrint = 0;
+        if (millis() - lastSensorPrint > 10000) {
+            Serial.print("🔍 Flow L/s: ");
+            Serial.print(metrics.flowLps, 3);
+            Serial.print(" | Tank cm: ");
+            Serial.print(metrics.tankHeightCm, 2);
+            Serial.print(" | Noise %: ");
+            Serial.println(metrics.tankNoisePercent, 2);
+            lastSensorPrint = millis();
+        }
     }
 }
 
@@ -311,6 +385,14 @@ void uiTask(void* parameter) {
         if (hasMetrics) {
             g_ui.setMetrics(metrics);
         }
+        
+        // SD kart hazır flag'ini kontrol et
+        if (g_sdCardReadyFlag) {
+            Serial.println("🎯 UI Task: SD hazır flag algılandı, mesaj gösteriliyor...");
+            g_ui.showSdCardReady();
+            g_sdCardReadyFlag = false;
+        }
+        
         g_ui.update();
         vTaskDelay(pdMS_TO_TICKS(50));
     }

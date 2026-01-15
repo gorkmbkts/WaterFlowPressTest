@@ -1,5 +1,6 @@
 #include "SdLogger.h"
 
+#include <SD.h>
 #include <SPI.h>
 #include <algorithm>
 #include <vector>
@@ -11,22 +12,47 @@ constexpr uint64_t FOUR_GB = 4ULL * 1024ULL * 1024ULL * 1024ULL;
 }
 
 bool SdLogger::begin(uint8_t csPin, SPIClass& spi, ConfigService* config) {
+    Serial.println("[SdLogger] Begin initialization...");
     _csPin = csPin;
     _spi = &spi;
     _config = config;
+    Serial.printf("[SdLogger] CS Pin: %d\n", _csPin);
+    
+    // SPI ayarlarını manuel olarak yap
     _spi->begin();
-    _sdReady = _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
-    if (_sdReady) {
-        ensureDirectories();
+    _spi->setFrequency(1000000); // 1MHz ile başla (daha güvenli)
+    delay(500); // SD kart için bekleme
+    
+    Serial.println("[SdLogger] SPI initialized with 1MHz");
+    
+    // Birden fazla deneme yap
+    for (int attempt = 1; attempt <= 5; attempt++) {
+        Serial.printf("[SdLogger] SD.begin attempt %d/5...\n", attempt);
+        _sdReady = SD.begin(_csPin, *_spi, 1000000); // SPI referansı ve frekans belirt
+        
+        if (_sdReady) {
+            Serial.println("[SdLogger] ✅ SD.begin SUCCESS!");
+            ensureDirectories();
+            Serial.println("[SdLogger] Directories ensured");
+            return true;
+        } else {
+            Serial.printf("[SdLogger] ❌ Attempt %d failed\n", attempt);
+            delay(1000); // Denemeler arası bekleme
+        }
     }
-    return _sdReady;
+    
+    Serial.println("[SdLogger] ❌ All attempts failed!");
+    return false;
 }
 
 bool SdLogger::ensureMount() {
     if (!_sdReady) {
-        _sdReady = _sd.begin(SdSpiConfig(_csPin, DEDICATED_SPI, SPI_FULL_SPEED, _spi));
+        Serial.println("[SdLogger] Attempting to mount SD...");
+        _sdReady = SD.begin(_csPin);
+        Serial.printf("[SdLogger] Mount result: %s\n", _sdReady ? "SUCCESS" : "FAILED");
         if (_sdReady) {
             ensureDirectories();
+            Serial.println("[SdLogger] Mount successful, directories ready");
         }
     }
     return _sdReady;
@@ -36,11 +62,11 @@ void SdLogger::ensureDirectories() {
     if (!_sdReady) {
         return;
     }
-    if (!_sd.exists("/logs")) {
-        _sd.mkdir("/logs");
+    if (!SD.exists("/logs")) {
+        SD.mkdir("/logs");
     }
-    if (!_sd.exists("/events")) {
-        _sd.mkdir("/events");
+    if (!SD.exists("/events")) {
+        SD.mkdir("/events");
     }
 }
 
@@ -59,7 +85,7 @@ void SdLogger::ensureDailyLog(time_t timestamp) {
         _logFile.close();
     }
     _currentLogPath = path;
-    _logFile = _sd.open(path, O_RDWR | O_CREAT | O_AT_END);
+    _logFile = SD.open(path, FILE_APPEND);
     if (!_logFile) {
         _sdReady = false;
         return;
@@ -69,7 +95,7 @@ void SdLogger::ensureDailyLog(time_t timestamp) {
     }
 }
 
-void SdLogger::writeCsvHeader(File32& file) {
+void SdLogger::writeCsvHeader(File& file) {
     file.print(F("timestamp,iso8601,pulses,flow_lps,flow_baseline_lps,flow_diff_pct,flow_min_healthy_lps,flow_mean_lps,flow_median_lps,flow_std_lps,flow_min_lps,flow_max_lps,"));
     file.print(F("flow_pulse_mean_us,flow_pulse_median_us,flow_pulse_std_us,flow_pulse_cv,flow_period_count"));
     for (size_t i = 0; i < utils::MAX_FLOW_PERIOD_SAMPLES; ++i) {
@@ -79,7 +105,7 @@ void SdLogger::writeCsvHeader(File32& file) {
     file.println(F(",tank_height_cm,tank_empty_cm,tank_full_cm,tank_diff_pct,tank_noise_pct,tank_mean_cm,tank_median_cm,tank_std_cm,tank_min_cm,tank_max_cm,level_voltage_inst,level_voltage_avg,level_voltage_median,level_voltage_trimmed,level_voltage_std,level_voltage_ema,level_current_ma,level_depth_mm,level_height_raw_cm,level_height_filtered_cm,level_velocity_mm_s,density_factor"));
 }
 
-void SdLogger::writeLogLine(File32& file, const utils::SensorMetrics& metrics) {
+void SdLogger::writeLogLine(File& file, const utils::SensorMetrics& metrics) {
     struct tm timeinfo;
     localtime_r(&metrics.timestamp, &timeinfo);
     char iso[25];
@@ -173,58 +199,59 @@ void SdLogger::ensureFreeSpace() {
     if (!_sdReady) {
         return;
     }
-    FatVolume* vol = _sd.vol();
-    if (!vol) {
-        return;
-    }
-    uint64_t freeClusters = vol->freeClusterCount();
-    uint64_t bytesPerCluster = static_cast<uint64_t>(vol->sectorsPerCluster()) * 512ULL;
-    uint64_t freeBytes = freeClusters * bytesPerCluster;
+    
+    // SD.h ile free space kontrolü daha basit
+    uint64_t totalBytes = SD.totalBytes();
+    uint64_t usedBytes = SD.usedBytes();
+    uint64_t freeBytes = totalBytes - usedBytes;
+    
     if (freeBytes >= FOUR_GB) {
         return;
     }
 
-    File32 dir = _sd.open("/logs");
+    File dir = SD.open("/logs");
     if (!dir) {
         return;
     }
+    
     std::vector<String> logFiles;
-    File32 file;
-    while (file.openNext(&dir, O_RDONLY)) {
-        if (file.isFile()) {
-            char name[64];
-            file.getName(name, sizeof(name));
-            logFiles.emplace_back(name);
+    File file = dir.openNextFile();
+    while (file) {
+        if (!file.isDirectory()) {
+            logFiles.emplace_back(file.name());
         }
         file.close();
+        file = dir.openNextFile();
     }
     dir.close();
+    
     std::sort(logFiles.begin(), logFiles.end());
     for (const auto& name : logFiles) {
+        usedBytes = SD.usedBytes();
+        freeBytes = totalBytes - usedBytes;
         if (freeBytes >= FOUR_GB) {
             break;
         }
         String fullPath = String("/logs/") + name;
         trimLogFile(fullPath);
-        freeClusters = vol->freeClusterCount();
-        freeBytes = freeClusters * bytesPerCluster;
     }
 }
 
 void SdLogger::trimLogFile(const String& path) {
-    File32 source = _sd.open(path.c_str(), O_RDWR);
+    File source = SD.open(path.c_str(), FILE_READ);
     if (!source) {
         return;
     }
-    uint64_t size = source.fileSize();
-    const uint64_t minimumSize = 512ULL * 1024ULL;  // only trim files larger than 512 KB
+    
+    size_t size = source.size();
+    const size_t minimumSize = 512UL * 1024UL;  // only trim files larger than 512 KB
     if (size < minimumSize) {
         source.close();
         return;
     }
 
-    uint64_t keepBytes = size / 2;
-    uint64_t offset = size - keepBytes;
+    size_t keepBytes = size / 2;
+    size_t offset = size - keepBytes;
     if (!source.seek(offset)) {
         source.close();
         return;
@@ -239,7 +266,7 @@ void SdLogger::trimLogFile(const String& path) {
     }
 
     String tempPath = path + ".tmp";
-    File32 temp = _sd.open(tempPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY);
+    File temp = SD.open(tempPath.c_str(), FILE_WRITE);
     if (!temp) {
         source.close();
         return;
@@ -249,18 +276,18 @@ void SdLogger::trimLogFile(const String& path) {
 
     char buffer[256];
     while (source.available()) {
-        int32_t readCount = source.read(buffer, sizeof(buffer));
-        if (readCount <= 0) {
+        int bytesRead = source.readBytes(buffer, sizeof(buffer));
+        if (bytesRead <= 0) {
             break;
         }
-        temp.write(buffer, readCount);
+        temp.write((uint8_t*)buffer, bytesRead);
     }
-    temp.sync();
+    temp.flush();
     temp.close();
     source.close();
 
-    _sd.remove(path.c_str());
-    _sd.rename(tempPath.c_str(), path.c_str());
+    SD.remove(path.c_str());
+    SD.rename(tempPath.c_str(), path.c_str());
 }
 
 void SdLogger::syncBufferLimit() {
@@ -286,6 +313,18 @@ void SdLogger::syncBufferLimit() {
 }
 
 void SdLogger::log(const utils::SensorMetrics& metrics) {
+    // SD kart güvenli kaldırma modundayken log yapma
+    if (_safeToRemove) {
+        // Sadece buffer'a ekle, SD'ye yazma
+        syncBufferLimit();
+        LogEntry entry{metrics.timestamp, metrics};
+        _buffer.push_back(entry);
+        while (_buffer.size() > _maxBufferEntries) {
+            _buffer.pop_front();
+        }
+        return;
+    }
+    
     if (!ensureMount()) {
         return;
     }
@@ -331,7 +370,7 @@ void SdLogger::startEventFile(time_t timestamp) {
     if (_eventFile) {
         _eventFile.close();
     }
-    _eventFile = _sd.open(name, O_RDWR | O_CREAT | O_TRUNC);
+    _eventFile = SD.open(name, FILE_WRITE);
     if (!_eventFile) {
         return;
     }
@@ -353,8 +392,98 @@ void SdLogger::closeEventFile() {
 }
 
 void SdLogger::update() {
-    if (!_sdReady) {
+    // Güvenli kaldırma modundayken 3 aşamalı kontrol
+    if (_safeToRemove) {
+        unsigned long now = millis();
+        unsigned long elapsed = now - _safeRemovalTime;
+        
+        // AŞAMA 1: İlk 15 saniye hiç kart algılamaya çalışma
+        if (elapsed < 15000) {
+            static unsigned long lastWaitMessage = 0;
+            if (now - lastWaitMessage > 5000) {
+                unsigned long remaining = (15000 - elapsed) / 1000;
+                Serial.printf("⏰ Kart algılaması durduruldu, %lu saniye kaldı...\n", remaining);
+                lastWaitMessage = now;
+            }
+            return;
+        }
+        
+        // AŞAMA 2 & 3: 15 saniye sonra kart durumunu kontrol et
+        static unsigned long lastCheckTime = 0;
+        static bool cardWasRemoved = false;
+        
+        // 2 saniyede bir kontrol et
+        if (now - lastCheckTime > 2000) {
+            lastCheckTime = now;
+            
+            // SPI'yi yeniden başlat ve kart var mı test et  
+            _spi->end();
+            delay(100);
+            _spi->begin();
+            delay(100);
+            
+            bool cardDetected = SD.begin(_csPin);
+            
+            if (!cardDetected && !cardWasRemoved) {
+                // Kart ilk defa çıkarıldı
+                cardWasRemoved = true;
+                Serial.println("🎉 SD kart başarıyla fiziksel olarak çıkarıldı!");
+                Serial.println("💡 Kartı yeniden taktığınızda algılanacak...");
+            } else if (cardDetected && cardWasRemoved) {
+                // Kart geri takıldı
+                Serial.println("✅ SD kart yeniden takıldı ve algılandı!");
+                _sdReady = true;
+                _safeToRemove = false;
+                _safeRemovalTime = 0;
+                cardWasRemoved = false;
+                ensureDirectories();
+                
+                if (_sdReadyCallback) {
+                    Serial.println("📢 SD hazır callback çağrılıyor...");
+                    _sdReadyCallback();
+                } else {
+                    Serial.println("❌ SD hazır callback null!");
+                }
+            } else if (cardDetected && !cardWasRemoved) {
+                // Kart hâlâ takılı, kullanıcı henüz çıkarmamış
+                Serial.println("💭 SD kart hâlâ takılı, fiziksel olarak çıkarmanızı bekliyoruz...");
+            }
+        }
         return;
+    }
+    
+    // SD kart bağlantısını kontrol et (sadece normal modda)
+    if (!_sdReady) {
+        Serial.println("🔍 SD kart yeniden bağlanmaya çalışılıyor...");
+        
+        // SD.begin() çağrılmadan önce SPI'yi yeniden başlat
+        _spi->end();
+        delay(100);
+        _spi->begin();
+        delay(100);
+        
+        bool reconnected = SD.begin(_csPin);
+        if (reconnected) {
+            Serial.println("✅ SD kart yeniden algılandı!");
+            _sdReady = true;
+            ensureDirectories();
+            
+            // SD kart hazır callback'ini çağır
+            if (_sdReadyCallback) {
+                Serial.println("📢 SD hazır callback çağrılıyor...");
+                _sdReadyCallback();
+            } else {
+                Serial.println("❌ SD hazır callback null!");
+            }
+        } else {
+            // Sessizce tekrar dene, spam yapmamak için
+            static unsigned long lastRetry = 0;
+            if (millis() - lastRetry > 2000) {
+                Serial.println("🔄 SD kart algılanamadı, 2 saniye sonra tekrar denenecek...");
+                lastRetry = millis();
+            }
+        }
+        return; // SD hazır değilse diğer işlemleri yapma
     }
     ensureFreeSpace();
     if (_eventActive) {
@@ -368,14 +497,56 @@ void SdLogger::update() {
 
 void SdLogger::flushFiles() {
     if (_logFile) {
-        _logFile.sync();
+        _logFile.flush();
     }
     if (_eventActive) {
-        _eventFile.sync();
+        _eventFile.flush();
     }
 }
 
 void SdLogger::requestEventSnapshot() {
     _eventRequested = true;
+}
+
+void SdLogger::setSdReadyCallback(SdReadyCallback callback) {
+    _sdReadyCallback = callback;
+}
+
+void SdLogger::prepareForRemoval() {
+    Serial.printf("🔧 prepareForRemoval() çağrıldı, _sdReady: %s\n", _sdReady ? "true" : "false");
+    
+    if (!_sdReady) {
+        Serial.println("⚠️  SD hazır değil, sadece flag ayarlanıyor");
+        _safeToRemove = true;
+        _safeRemovalTime = millis();
+        return;
+    }
+    
+    // Tüm dosyaları kapat ve sync et
+    if (_logFile) {
+        _logFile.flush();  // Buffer'ları boşalt
+        _logFile.close();  // Dosyayı kapat
+    }
+    
+    if (_eventFile) {
+        _eventFile.flush(); // Buffer'ları boşalt
+        _eventFile.close(); // Dosyayı kapat
+    }
+    
+    // SD kartı güvenli unmount et
+    Serial.println("💾 SD kartı güvenli unmount ediliyor...");
+    delay(200);            // Dosya işlemlerinin tamamlanması için bekle
+    SD.end();              // SD kart nesnesini kapat
+    
+    _sdReady = false;
+    _safeToRemove = true;
+    _safeRemovalTime = millis();  // Güvenli kaldırma zamanını kaydet
+    Serial.println("✅ SD kart güvenli kaldırma moduna alındı");
+    Serial.println("⏰ 15 saniye boyunca kart algılaması durdurulacak...");
+    
+    // Dosya durumlarını temizle
+    _eventActive = false;
+    _eventRequested = false;
+    _currentLogPath = "";
 }
 

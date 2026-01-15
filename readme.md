@@ -1,0 +1,1 @@
+buton 1: 3 second hold=sd card remove
